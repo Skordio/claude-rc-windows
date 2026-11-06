@@ -5,15 +5,20 @@
         Title="Settings - claude-rc-windows" Width="620" SizeToContent="Height" ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner" Icon="/Assets/tray.ico" ShowInTaskbar="True">
   <StackPanel Margin="16">
-    <!-- Start mode (SPEC 3.4); changed through Task Scheduler in a later version. -->
+    <!-- Start mode (SPEC 3.4, 9): Save re-creates the scheduled task. -->
     <TextBlock Text="Start mode" FontWeight="SemiBold" />
     <StackPanel Margin="0,4,0,0" IsEnabled="{Binding CanChangeStartMode}">
-      <RadioButton Content="At logon (default)" IsChecked="{Binding StartModeIsLogon, Mode=OneWay}" GroupName="mode" />
-      <RadioButton Content="At startup (before logon)" IsChecked="{Binding StartModeIsStartup, Mode=OneWay}" GroupName="mode" Margin="0,2,0,0" />
+      <RadioButton Content="At logon (default)" IsChecked="{Binding StartModeIsLogon}" GroupName="mode" />
+      <RadioButton Content="At startup (before logon)" IsChecked="{Binding StartModeIsStartup}" GroupName="mode" Margin="0,2,0,0" />
     </StackPanel>
     <TextBlock Margin="0,2,0,0" Foreground="{StaticResource MutedText}" TextWrapping="Wrap">
-      <Run Text="Current: " /><Run Text="{Binding StartModeText, Mode=OneWay}" /><Run Text=". The start mode can't be changed from this version of the app yet." />
+      <Run Text="Current: " /><Run Text="{Binding StartModeText, Mode=OneWay}" /><Run Text=". At startup needs administrator approval and your Windows password once (not a PIN): Task Scheduler stores it, this app never does." />
     </TextBlock>
+    <DockPanel Margin="0,6,0,0" Visibility="{Binding NeedsPassword, Converter={StaticResource BoolToVisibility}}">
+      <Button DockPanel.Dock="Right" Content="Re-enter password…" Padding="10,2" Margin="6,0,0,0" Command="{Binding ReenterPasswordCommand}" />
+      <TextBlock Foreground="{StaticResource ErrorText}" TextWrapping="Wrap" VerticalAlignment="Center"
+                 Text="Task Scheduler could not start the host: your Windows password changed. Re-enter your password." />
+    </DockPanel>
 
     <!-- claude path -->
     <TextBlock Text="claude.exe path" FontWeight="SemiBold" Margin="0,14,0,0" />
@@ -67,7 +72,7 @@
     <TextBlock Text="{Binding ValidationError}" Foreground="{StaticResource ErrorText}" TextWrapping="Wrap" Margin="0,12,0,0" />
 
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
-      <Button Content="Save" IsDefault="True" Padding="16,3" Command="{Binding SaveCommand}" IsEnabled="{Binding CanEdit}" />
+      <Button Content="Save" IsDefault="True" Padding="16,3" Command="{Binding SaveCommand}" IsEnabled="{Binding CanSave}" />
       <!-- IsCancel closes only a ShowDialog window; this one is modeless, so Click closes it. -->
       <Button Content="Cancel" IsCancel="True" Padding="16,3" Margin="8,0,0,0" Click="Cancel_Click" />
     </StackPanel>

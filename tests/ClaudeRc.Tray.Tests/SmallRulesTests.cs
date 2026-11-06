@@ -170,66 +170,99 @@ public class TrayOptionsPartBTests
     }
 }
 
-public class ProcessRunnerTests
+public class TrayOptionsStartModeTests
 {
+    private const string Sid = "S-1-5-21-1-2-3-1001";
+    private const string Local = @"C:\Users\me\AppData\Local";
+    private const string Roaming = @"C:\Users\me\AppData\Roaming";
+    private const string AppDir = @"C:\Users\me\AppData\Local\Programs\claude-rc-windows";
+
+    private static TrayOptions Parse(params string[] args) => TrayOptions.Parse(args, Sid, Local, Roaming, AppDir);
+
     [Fact]
-    public async Task A_process_that_outlives_the_timeout_is_killed()
+    public void The_host_is_next_to_the_app_and_gets_no_arguments_in_production()
     {
-        // A process this test starts itself (hidden): ping waits about a second per echo.
-        var psi = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "PING.EXE"))
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        foreach (var a in new[] { "-n", "60", "127.0.0.1" })
-            psi.ArgumentList.Add(a);
-        var pid = 0;
-
-        var (code, _) = await ClaudeRc.Tray.Hosting.SchtasksHostTask.RunProcessAsync(
-            psi, TimeSpan.FromMilliseconds(300), CancellationToken.None, p => pid = p.Id);
-
-        Assert.Equal(-1, code);
-        Assert.NotEqual(0, pid);
-        var deadline = Environment.TickCount64 + 5000;
-        while (IsRunning(pid))
-        {
-            if (Environment.TickCount64 > deadline)
-                Assert.Fail($"ping {pid} still running after the timeout");
-            await Task.Delay(25);
-        }
+        var o = Parse();
+        Assert.Equal(AppDir + @"\ClaudeRcHost.exe", o.HostExe);
+        Assert.Empty(o.HostArguments);
+        Assert.Null(o.SetStartMode);
+        Assert.Null(o.ForUser);
+        Assert.False(o.RestartHost);
     }
 
     [Fact]
-    public async Task A_quick_process_returns_its_exit_code_and_output()
+    public void A_test_instance_host_gets_its_own_folders()
     {
-        var psi = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        foreach (var a in new[] { "/d", "/c", "echo hello& exit 3" })
-            psi.ArgumentList.Add(a);
-
-        var (code, output) = await ClaudeRc.Tray.Hosting.SchtasksHostTask.RunProcessAsync(psi, TimeSpan.FromSeconds(15), CancellationToken.None);
-
-        Assert.Equal(3, code);
-        Assert.Contains("hello", output, StringComparison.Ordinal);
+        var o = Parse("--instance", "t1");
+        Assert.Equal(
+            ["--instance", "t1",
+             "--data-dir", Roaming + @"\claude-rc-windows-t1",
+             "--log-dir", Local + @"\claude-rc-windows-t1\logs",
+             "--claude-json", Local + @"\claude-rc-windows-t1\claude.json"],
+            o.HostArguments);
     }
 
-    private static bool IsRunning(int pid)
+    [Fact]
+    public void Host_exe_and_host_arguments_can_be_given()
     {
-        try
-        {
-            using var p = System.Diagnostics.Process.GetProcessById(pid);
-            return !p.HasExited;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
+        var o = Parse("--instance", "t1", "--host-exe", @"D:\build\ClaudeRcHost.exe", "--host-arg", "--instance", "--host-arg", "t1",
+            "--host-arg", "--data-dir", "--host-arg", @"D:\tmp\a b");
+        Assert.Equal(@"D:\build\ClaudeRcHost.exe", o.HostExe);
+        Assert.Equal(["--instance", "t1", "--data-dir", @"D:\tmp\a b"], o.HostArguments);
+    }
+
+    [Theory]
+    [InlineData("--host-exe", "ClaudeRcHost.exe")]
+    [InlineData("--host-exe")]
+    [InlineData("--host-arg")]
+    [InlineData("--set-start-mode", "never")]
+    [InlineData("--set-start-mode")]
+    [InlineData("--for-user")]
+    [InlineData("--for-user", " ")]
+    public void Bad_start_mode_arguments_are_refused(params string[] args)
+    {
+        Assert.Throws<ArgumentException>(() => Parse(args));
+    }
+
+    [Theory]
+    [InlineData("logon", "Logon")]
+    [InlineData("startup", "Startup")]
+    public void The_elevated_helper_is_asked_for_a_mode(string arg, string mode)
+    {
+        var o = Parse("--set-start-mode", arg, "--for-user", @"PC\Jo Smith", "--restart-host");
+        Assert.Equal(Enum.Parse<StartMode>(mode), o.SetStartMode);
+        Assert.Equal(@"PC\Jo Smith", o.ForUser);
+        Assert.True(o.RestartHost);
+    }
+
+    [Fact]
+    public void A_mode_without_the_user_is_refused()
+    {
+        Assert.Throws<ArgumentException>(() => Parse("--set-start-mode", "startup"));
+    }
+
+    [Fact]
+    public void The_helper_arguments_give_the_helper_the_same_task_host_and_arguments()
+    {
+        var tray = Parse("--instance", "t1", "--host-exe", @"D:\b d\ClaudeRcHost.exe");
+
+        var args = tray.HelperArguments(StartMode.Startup, @"PC\Jo Smith", restartHost: true);
+
+        // An elevated helper may run as another (admin) account: its own AppData must not matter.
+        var helper = TrayOptions.Parse(args, Sid, @"C:\Users\admin\AppData\Local", @"C:\Users\admin\AppData\Roaming", AppDir);
+        Assert.Equal(StartMode.Startup, helper.SetStartMode);
+        Assert.Equal(@"PC\Jo Smith", helper.ForUser);
+        Assert.True(helper.RestartHost);
+        Assert.Equal(tray.TaskPath, helper.TaskPath);
+        Assert.Equal(tray.HostExe, helper.HostExe);
+        Assert.Equal(tray.HostArguments, helper.HostArguments);
+        Assert.False(TrayOptions.Parse(tray.HelperArguments(StartMode.Logon, @"PC\Jo", restartHost: false), Sid, Local, Roaming, AppDir).RestartHost);
+    }
+
+    [Fact]
+    public void Production_helper_arguments_have_no_instance_and_no_host_arguments()
+    {
+        var args = Parse().HelperArguments(StartMode.Logon, @"PC\Jo", restartHost: false);
+        Assert.Equal(["--set-start-mode", "logon", "--for-user", @"PC\Jo", "--host-exe", AppDir + @"\ClaudeRcHost.exe"], args);
     }
 }

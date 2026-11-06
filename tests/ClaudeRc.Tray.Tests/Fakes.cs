@@ -237,3 +237,158 @@ internal sealed class FakeNotifier : ClaudeRc.Tray.Notifications.IToastNotifier
 
     public void Click(string path) => Activated?.Invoke(this, path);
 }
+
+/// <summary>Task Scheduler in memory: tasks by path, every call recorded, errors injected per operation.</summary>
+internal sealed class FakeTaskService : ITaskService
+{
+    public sealed class Entry
+    {
+        public required string Xml { get; set; }
+        public required string Account { get; set; }
+        public required TaskLogon Logon { get; set; }
+        public TaskRunState State { get; set; } = TaskRunState.Ready;
+        public int LastResult { get; set; } = HostTaskDefinition.HasNotRun;
+        public DateTime? LastRunTime { get; set; }
+        public DateTime? NextRunTime { get; set; }
+    }
+
+    public Dictionary<string, Entry> Tasks { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Every call in order: "find", "register", "delete", "run", "stop", with the path.</summary>
+    public List<string> Calls { get; } = [];
+
+    /// <summary>The passwords Register was given, in order (null for none).</summary>
+    public List<string?> Passwords { get; } = [];
+
+    /// <summary>Thrown by the next call of that operation ("find", "register", …), then removed.</summary>
+    public Dictionary<string, Queue<Exception>> Errors { get; } = [];
+
+    public void FailNext(string op, Exception e)
+    {
+        if (!Errors.TryGetValue(op, out var q))
+            Errors[op] = q = new Queue<Exception>();
+        q.Enqueue(e);
+    }
+
+    /// <summary>Stop does not end the running instance (a host that hangs).</summary>
+    public bool StopLeavesRunning { get; set; }
+
+    /// <summary>Fails every call of an operation.</summary>
+    public Dictionary<string, Exception> AlwaysFail { get; } = [];
+
+    private void Enter(string op, string path)
+    {
+        Calls.Add($"{op} {path}");
+        if (AlwaysFail.TryGetValue(op, out var always))
+            throw always;
+        if (Errors.TryGetValue(op, out var q) && q.Count > 0)
+            throw q.Dequeue();
+    }
+
+    public void Add(string path, StartMode mode, TaskRunState state = TaskRunState.Ready, int lastResult = HostTaskDefinition.HasNotRun) =>
+        Tasks[path] = new Entry
+        {
+            Xml = HostTaskDefinition.BuildXml(new HostTaskSpec { TaskPath = path, Mode = mode, HostExe = @"C:\app\ClaudeRcHost.exe", Account = @"PC\me" }),
+            Account = @"PC\me",
+            Logon = HostTaskDefinition.LogonFor(mode),
+            State = state,
+            LastResult = lastResult,
+        };
+
+    public TaskSnapshot? Find(string taskPath)
+    {
+        Enter("find", taskPath);
+        return Tasks.TryGetValue(taskPath, out var e) ? new TaskSnapshot(e.Xml, e.State, e.LastResult, e.LastRunTime, e.NextRunTime) : null;
+    }
+
+    public void Register(string taskPath, string xml, string account, string? password, TaskLogon logon)
+    {
+        Passwords.Add(password);
+        Enter("register", taskPath);
+        // Updating a task leaves its running instance (and last result) as they are.
+        var old = Tasks.GetValueOrDefault(taskPath);
+        Tasks[taskPath] = new Entry
+        {
+            Xml = xml,
+            Account = account,
+            Logon = logon,
+            State = old?.State ?? TaskRunState.Ready,
+            LastResult = old?.LastResult ?? HostTaskDefinition.HasNotRun,
+        };
+    }
+
+    public void Delete(string taskPath)
+    {
+        Enter("delete", taskPath);
+        Tasks.Remove(taskPath);
+    }
+
+    public void Run(string taskPath)
+    {
+        Enter("run", taskPath);
+        if (!Tasks.TryGetValue(taskPath, out var e))
+            throw new FileNotFoundException("no such task", taskPath);
+        e.State = TaskRunState.Running;
+        e.LastResult = HostTaskDefinition.TaskIsRunning;
+    }
+
+    public void Stop(string taskPath)
+    {
+        Enter("stop", taskPath);
+        if (!Tasks.TryGetValue(taskPath, out var e))
+            throw new FileNotFoundException("no such task", taskPath);
+        if (e.State == TaskRunState.Running && !StopLeavesRunning)
+            e.State = TaskRunState.Ready;
+    }
+}
+
+/// <summary>Records what would be run elevated; answers with <see cref="ExitCode"/> (null = the user said No at UAC).</summary>
+internal sealed class FakeElevation : IElevation
+{
+    public List<IReadOnlyList<string>> Runs { get; } = [];
+    public int? ExitCode { get; set; } = 0;
+
+    /// <summary>Runs "inside the elevated helper" before answering (e.g. to change the fake Task Scheduler).</summary>
+    public Action<IReadOnlyList<string>>? OnRun { get; set; }
+
+    public Task<int?> RunElevatedAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken = default)
+    {
+        Runs.Add(arguments);
+        OnRun?.Invoke(arguments);
+        return Task.FromResult(ExitCode);
+    }
+}
+
+/// <summary>Hands out the queued passwords in turn; a null entry (or an empty queue) is Cancel.</summary>
+internal sealed class FakeCredentialPrompt : ICredentialPrompt
+{
+    public Queue<string?> Answers { get; } = new();
+    public List<(string Account, string? Error)> Prompts { get; } = [];
+    public List<PromptedPassword> Handed { get; } = [];
+
+    public PromptedPassword? Prompt(string account, string? error)
+    {
+        Prompts.Add((account, error));
+        if (!Answers.TryDequeue(out var answer) || answer is null)
+            return null;
+        var p = new PromptedPassword(answer.ToCharArray());
+        Handed.Add(p);
+        return p;
+    }
+}
+
+internal sealed class FakeSwitcher : IStartModeSwitcher
+{
+    public List<(StartMode Mode, bool Restart)> Calls { get; } = [];
+    public SwitchResult Result { get; set; } = SwitchResult.Done;
+
+    /// <summary>Runs before answering (e.g. to make the fake task exist).</summary>
+    public Action<StartMode>? OnSwitch { get; set; }
+
+    public Task<SwitchResult> SwitchAsync(StartMode target, bool restartHost, CancellationToken cancellationToken = default)
+    {
+        Calls.Add((target, restartHost));
+        OnSwitch?.Invoke(target);
+        return Task.FromResult(Result);
+    }
+}

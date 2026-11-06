@@ -1,4 +1,5 @@
 using System.Text;
+using ClaudeRc.Core.Processes;
 using ClaudeRc.Core.Prompts;
 using ClaudeRc.Host.Terminal;
 

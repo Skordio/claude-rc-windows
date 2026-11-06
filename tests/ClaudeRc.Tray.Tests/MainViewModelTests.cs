@@ -12,6 +12,7 @@ public sealed class MainViewModelTests : IAsyncDisposable
     private readonly FakeConnector _connector = new();
     private readonly FakeDialogs _dialogs = new();
     private readonly FakeHostTask _task = new();
+    private readonly FakeSwitcher _switcher = new();
     private readonly FakeShell _shell = new();
     private readonly FakeWindows _windows = new();
     private readonly HostConnection _connection;
@@ -21,7 +22,7 @@ public sealed class MainViewModelTests : IAsyncDisposable
     public MainViewModelTests()
     {
         _connection = new HostConnection(_connector, _time);
-        _vm = new MainViewModel(_connection, _task, _dialogs, _shell, _windows, _time, _networkPaths.Contains);
+        _vm = new MainViewModel(_connection, _task, _switcher, _dialogs, _shell, _windows, _time, _networkPaths.Contains);
     }
 
     public async ValueTask DisposeAsync() => await _connection.DisposeAsync();
@@ -108,15 +109,131 @@ public sealed class MainViewModelTests : IAsyncDisposable
         Assert.Equal("claude: claude not found: install Claude Code or set its path in Settings", _vm.ClaudeText);
     }
 
+    private const string TaskPath = @"\claude-rc-windows\Host";
+
+    private static HostTaskInfo Exists(StartMode mode, int? lastResult = 0, bool running = false, bool enabled = true) =>
+        new(HostTaskState.Exists, mode, TaskPath) { LastResult = lastResult, Running = running, Enabled = enabled };
+
     [Fact]
-    public async Task Start_mode_comes_from_the_task_and_is_unknown_until_m4()
+    public async Task Status_bar_shows_the_start_mode_and_task_health()
     {
-        await _vm.LoadTaskInfoAsync();
         Assert.Equal("Start mode: unknown", _vm.StartModeText);
 
-        _task.Info = _task.Info with { StartMode = StartMode.Logon };
         await _vm.LoadTaskInfoAsync();
-        Assert.Equal("Start mode: at logon", _vm.StartModeText);
+        Assert.Equal("Start mode: no scheduled task", _vm.StartModeText);
+
+        _task.Info = Exists(StartMode.Logon, running: true);
+        await _vm.LoadTaskInfoAsync();
+        Assert.Equal("Start mode: at logon · running", _vm.StartModeText);
+
+        _task.Info = Exists(StartMode.Startup);
+        await _vm.LoadTaskInfoAsync();
+        Assert.Equal("Start mode: at startup · ready", _vm.StartModeText);
+
+        _task.Info = Exists(StartMode.Logon, enabled: false);
+        await _vm.LoadTaskInfoAsync();
+        Assert.Equal("Start mode: at logon · disabled", _vm.StartModeText);
+
+        _task.Info = new HostTaskInfo(HostTaskState.Unknown, StartMode.Unknown, TaskPath) { Error = "The service is not available" };
+        await _vm.LoadTaskInfoAsync();
+        Assert.Equal("Start mode: unknown (the task could not be read: The service is not available)", _vm.StartModeText);
+    }
+
+    [Fact]
+    public async Task A_changed_password_shows_re_enter_and_its_button()
+    {
+        _task.Info = Exists(StartMode.Startup, HostTaskDefinition.LogonFailure);
+        await _vm.LoadTaskInfoAsync();
+
+        Assert.Equal("Start mode: at startup · re-enter your password", _vm.StartModeText);
+        Assert.True(_vm.ShowReenterPassword);
+
+        _task.Info = Exists(StartMode.Startup);
+        await _vm.LoadTaskInfoAsync();
+        Assert.False(_vm.ShowReenterPassword);
+    }
+
+    [Fact]
+    public async Task Re_enter_password_reruns_the_startup_flow_and_starts_the_host_that_could_not_start()
+    {
+        _task.Info = Exists(StartMode.Startup, HostTaskDefinition.LogonFailure);
+        await _vm.LoadTaskInfoAsync();
+        _switcher.OnSwitch = _ => _task.Info = Exists(StartMode.Startup, running: true);
+
+        await _vm.ReenterPasswordAsync();
+
+        // The host could not start, so it is not connected: the task runs again at once.
+        Assert.Equal([(StartMode.Startup, true)], _switcher.Calls);
+        Assert.False(_vm.ShowReenterPassword);
+        Assert.Empty(_dialogs.Errors);
+    }
+
+    [Fact]
+    public async Task Re_enter_password_failures_are_shown_and_a_cancel_is_quiet()
+    {
+        _switcher.Result = new SwitchResult(SwitchOutcome.Failed, "it broke");
+        await _vm.ReenterPasswordAsync();
+        Assert.Equal("it broke", Assert.Single(_dialogs.Errors).Message);
+
+        _switcher.Result = new SwitchResult(SwitchOutcome.Cancelled, "Cancelled");
+        await _vm.ReenterPasswordAsync();
+        Assert.Single(_dialogs.Errors);
+    }
+
+    [Fact]
+    public async Task First_run_without_a_task_offers_to_create_the_logon_task()
+    {
+        _switcher.OnSwitch = _ => _task.Info = Exists(StartMode.Logon, running: true);
+
+        await _vm.StartupCheckAsync();
+
+        var (title, message) = Assert.Single(_dialogs.Confirms);
+        Assert.Contains("logon", title + message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("no administrator", message, StringComparison.OrdinalIgnoreCase);
+        // No host answers yet, so the new task is run straight away.
+        Assert.Equal([(StartMode.Logon, true)], _switcher.Calls);
+        Assert.Equal("Start mode: at logon · running", _vm.StartModeText);
+    }
+
+    [Fact]
+    public async Task First_run_with_a_host_already_running_creates_the_task_without_restarting_it()
+    {
+        await Connect();
+        await _vm.StartupCheckAsync();
+        Assert.Equal([(StartMode.Logon, false)], _switcher.Calls);
+    }
+
+    [Fact]
+    public async Task First_run_offer_declined_creates_nothing_and_is_not_repeated_in_this_run()
+    {
+        _dialogs.ConfirmAnswer = false;
+
+        await _vm.StartupCheckAsync();
+        await _vm.StartupCheckAsync();
+
+        Assert.Single(_dialogs.Confirms);
+        Assert.Empty(_switcher.Calls);
+        Assert.Equal("Start mode: no scheduled task", _vm.StartModeText);
+    }
+
+    [Fact]
+    public async Task First_run_offer_failure_is_shown()
+    {
+        _switcher.Result = new SwitchResult(SwitchOutcome.Failed, "ClaudeRcHost.exe was not found");
+        await _vm.StartupCheckAsync();
+        Assert.Contains("ClaudeRcHost.exe was not found", Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_existing_or_unreadable_task_is_not_offered()
+    {
+        _task.Info = Exists(StartMode.Startup);
+        await _vm.StartupCheckAsync();
+        _task.Info = new HostTaskInfo(HostTaskState.Unknown, StartMode.Unknown, TaskPath);
+        await _vm.StartupCheckAsync();
+
+        Assert.Empty(_dialogs.Confirms);
+        Assert.Empty(_switcher.Calls);
     }
 
     [Fact]

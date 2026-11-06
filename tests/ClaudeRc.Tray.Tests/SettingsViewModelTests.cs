@@ -11,6 +11,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
     private readonly FakeConnector _connector = new();
     private readonly FakeDialogs _dialogs = new();
     private readonly FakeHostTask _task = new();
+    private readonly FakeSwitcher _switcher = new();
     private readonly HostConnection _connection;
 
     public SettingsViewModelTests()
@@ -26,7 +27,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
         _connector.Enqueue(client);
         _connection.Start();
         await Eventually.True(() => _connection.State == HostState.Connected, "connected");
-        var vm = new SettingsViewModel(_connection, _task, _dialogs);
+        var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs);
         await vm.LoadAsync();
         return (client, vm);
     }
@@ -46,12 +47,180 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
         Assert.Equal(@"missing (\claude-rc-windows\Host)", vm.TaskStatusText);
     }
 
+    private const string TaskPath = @"\claude-rc-windows\Host";
+
+    private static HostTaskInfo Exists(StartMode mode, int? lastResult = 0) =>
+        new(HostTaskState.Exists, mode, TaskPath) { LastResult = lastResult };
+
     [Fact]
-    public async Task Start_mode_is_shown_but_cannot_be_changed_until_m4()
+    public async Task The_current_start_mode_is_selected_and_can_be_changed()
+    {
+        _task.Info = Exists(StartMode.Logon);
+        var (_, vm) = await Open();
+
+        Assert.Equal("at logon", vm.StartModeText);
+        Assert.True(vm.StartModeIsLogon);
+        Assert.False(vm.StartModeIsStartup);
+        Assert.True(vm.CanChangeStartMode);
+        Assert.False(vm.StartModeChanged);
+    }
+
+    [Fact]
+    public async Task An_unreadable_task_cannot_be_switched()
+    {
+        _task.Info = new HostTaskInfo(HostTaskState.Unknown, StartMode.Unknown, TaskPath);
+        var (_, vm) = await Open();
+        Assert.False(vm.CanChangeStartMode);
+    }
+
+    [Fact]
+    public async Task Save_with_an_unchanged_mode_does_not_touch_the_task()
+    {
+        _task.Info = Exists(StartMode.Logon);
+        var (client, vm) = await Open();
+
+        Assert.True(await vm.SaveAsync());
+
+        Assert.Empty(_switcher.Calls);
+        Assert.Single(client.Sent<SettingsSetRequest>());
+    }
+
+    [Fact]
+    public async Task Switching_to_startup_asks_whether_to_restart_the_host_and_switches()
+    {
+        _task.Info = Exists(StartMode.Logon);
+        _switcher.OnSwitch = m => _task.Info = Exists(m);
+        var (client, vm) = await Open();
+        var closed = false;
+        vm.CloseRequested += (_, _) => closed = true;
+
+        vm.StartModeIsStartup = true;
+        Assert.True(vm.StartModeChanged);
+        Assert.False(vm.StartModeIsLogon);
+        Assert.True(await vm.SaveAsync());
+
+        var (_, question) = Assert.Single(_dialogs.Confirms);
+        Assert.Contains("Restart the host now", question, StringComparison.Ordinal);
+        Assert.Equal([(StartMode.Startup, true)], _switcher.Calls);
+        // The settings went to the host before the host was restarted.
+        Assert.Single(client.Sent<SettingsSetRequest>());
+        Assert.True(closed);
+        Assert.Equal("at startup", vm.StartModeText);
+    }
+
+    [Fact]
+    public async Task Not_restarting_switches_for_the_next_start_only()
+    {
+        _task.Info = Exists(StartMode.Startup);
+        _dialogs.ConfirmAnswer = false;
+        var (_, vm) = await Open();
+
+        vm.StartModeIsLogon = true;
+        Assert.True(await vm.SaveAsync());
+
+        Assert.Equal([(StartMode.Logon, false)], _switcher.Calls);
+    }
+
+    [Fact]
+    public async Task A_cancelled_switch_keeps_the_window_open_with_the_reason()
+    {
+        _task.Info = Exists(StartMode.Logon);
+        _switcher.Result = new SwitchResult(SwitchOutcome.Cancelled, "Cancelled: the start mode was not changed.");
+        var (_, vm) = await Open();
+        var closed = false;
+        vm.CloseRequested += (_, _) => closed = true;
+
+        vm.StartModeIsStartup = true;
+        Assert.False(await vm.SaveAsync());
+
+        Assert.False(closed);
+        Assert.Equal("Cancelled: the start mode was not changed.", vm.ValidationError);
+        Assert.True(vm.StartModeIsStartup); // the choice stays, so Save can try again
+    }
+
+    [Fact]
+    public async Task A_failed_switch_shows_the_reason()
+    {
+        _task.Info = Exists(StartMode.Logon);
+        _switcher.Result = new SwitchResult(SwitchOutcome.Failed, "it broke");
+        var (_, vm) = await Open();
+        vm.StartModeIsStartup = true;
+
+        Assert.False(await vm.SaveAsync());
+        Assert.Equal("it broke", vm.ValidationError);
+    }
+
+    [Fact]
+    public async Task A_note_from_a_done_switch_is_shown()
+    {
+        _task.Info = Exists(StartMode.Logon);
+        _switcher.Result = new SwitchResult(SwitchOutcome.Done, "could not restart");
+        var (_, vm) = await Open();
+        vm.StartModeIsStartup = true;
+
+        Assert.True(await vm.SaveAsync());
+        Assert.Equal("could not restart", Assert.Single(_dialogs.Infos).Message);
+    }
+
+    [Fact]
+    public async Task An_invalid_claude_path_stops_the_save_before_the_switch()
+    {
+        _task.Info = Exists(StartMode.Logon);
+        var (_, vm) = await Open();
+        vm.StartModeIsStartup = true;
+        vm.ClaudePathOverride = "claude.bat";
+
+        Assert.False(await vm.SaveAsync());
+        Assert.Empty(_switcher.Calls);
+    }
+
+    [Fact]
+    public async Task Without_a_host_the_start_mode_can_still_be_switched_and_the_task_is_run()
+    {
+        _task.Info = Exists(StartMode.Logon);
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
+        using var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs);
+        await vm.LoadAsync();
+        Assert.False(vm.CanEdit);
+        Assert.True(vm.CanChangeStartMode);
+        Assert.False(vm.CanSave);
+
+        vm.StartModeIsStartup = true;
+        Assert.True(vm.CanSave);
+        Assert.True(await vm.SaveAsync());
+
+        // No host to restart: nothing is asked, and the task runs at once.
+        Assert.Empty(_dialogs.Confirms);
+        Assert.Equal([(StartMode.Startup, true)], _switcher.Calls);
+    }
+
+    [Fact]
+    public async Task With_no_task_choosing_a_mode_creates_it()
     {
         var (_, vm) = await Open();
-        Assert.Equal("unknown", vm.StartModeText);
-        Assert.False(vm.CanChangeStartMode);
+        Assert.False(vm.StartModeIsLogon);
+        Assert.False(vm.StartModeIsStartup);
+        Assert.True(vm.CanChangeStartMode);
+
+        vm.StartModeIsLogon = true;
+        Assert.True(vm.StartModeChanged);
+        Assert.True(await vm.SaveAsync());
+        Assert.Equal(StartMode.Logon, Assert.Single(_switcher.Calls).Mode);
+    }
+
+    [Fact]
+    public async Task A_changed_password_shows_re_enter_which_reruns_the_startup_flow()
+    {
+        _task.Info = Exists(StartMode.Startup, HostTaskDefinition.LogonFailure);
+        _switcher.OnSwitch = m => _task.Info = Exists(m);
+        var (_, vm) = await Open();
+        Assert.True(vm.NeedsPassword);
+
+        await vm.ReenterPasswordAsync();
+
+        Assert.Equal(StartMode.Startup, Assert.Single(_switcher.Calls).Mode);
+        Assert.False(vm.NeedsPassword);
     }
 
     [Fact]
@@ -129,7 +298,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
     {
         _connection.Start();
         await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
-        var vm = new SettingsViewModel(_connection, _task, _dialogs);
+        var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs);
         await vm.LoadAsync();
 
         Assert.False(vm.CanEdit);
@@ -142,7 +311,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
     {
         _connection.Start();
         await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
-        using var vm = new SettingsViewModel(_connection, _task, _dialogs);
+        using var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs);
         await vm.LoadAsync();
         Assert.False(vm.CanEdit);
 

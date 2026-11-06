@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace ClaudeRc.Host.Sessions;
+namespace ClaudeRc.Core.Processes;
 
 /// <summary>
 /// Builds a Windows command line from an argument list with the quoting rules that
@@ -8,7 +8,7 @@ namespace ClaudeRc.Host.Sessions;
 /// <c>PasteArguments</c>, i.e. <c>ProcessStartInfo.ArgumentList</c> semantics, SPEC 6.3). No
 /// shell is involved, so <c>&amp;</c>, <c>%</c> and the like reach the program unchanged.
 /// </summary>
-internal static class CommandLine
+public static class CommandLine
 {
     /// <summary>The program followed by each argument, quoted where needed.</summary>
     public static string Build(string program, IEnumerable<string> arguments)
@@ -21,6 +21,25 @@ internal static class CommandLine
             sb.Append(program);
         foreach (var argument in arguments)
             AppendArgument(sb.Append(' '), argument);
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Only the arguments, each quoted where needed and separated by spaces: what goes after the
+    /// program (a scheduled task's <c>Arguments</c>, <c>ShellExecute</c>'s parameters).
+    /// </summary>
+    public static string JoinArguments(IEnumerable<string> arguments)
+    {
+        ArgumentNullException.ThrowIfNull(arguments);
+        var sb = new StringBuilder();
+        var first = true;
+        foreach (var argument in arguments)
+        {
+            if (!first)
+                sb.Append(' ');
+            first = false;
+            AppendArgument(sb, argument);
+        }
         return sb.ToString();
     }
 

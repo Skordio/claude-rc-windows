@@ -67,9 +67,10 @@ internal sealed class WpfDialogs : IDialogs
 /// <summary><see cref="IWindows"/>: one settings window at a time, one log window and one console window per folder.</summary>
 /// <param name="connection">The host connection.</param>
 /// <param name="task">The host's scheduled task.</param>
+/// <param name="switcher">Sets the start mode.</param>
 /// <param name="dialogs">Message boxes.</param>
 /// <param name="webViewDataDir">The console viewer's WebView2 user data folder (<see cref="TrayOptions.WebViewDataDir"/>).</param>
-internal sealed class WpfWindows(HostConnection connection, IHostTask task, IDialogs dialogs, string webViewDataDir) : IWindows
+internal sealed class WpfWindows(HostConnection connection, IHostTask task, IStartModeSwitcher switcher, IDialogs dialogs, string webViewDataDir) : IWindows
 {
     private readonly Dictionary<string, LogWindow> _logs = new(PathNormalizer.Comparer);
     private readonly Dictionary<string, ConsoleWindow> _consoles = new(PathNormalizer.Comparer);
@@ -87,7 +88,7 @@ internal sealed class WpfWindows(HostConnection connection, IHostTask task, IDia
             Activate(open);
             return;
         }
-        var vm = new SettingsViewModel(connection, task, dialogs);
+        var vm = new SettingsViewModel(connection, task, switcher, dialogs);
         var window = new SettingsWindow(vm);
         _settings = window;
         window.Closed += (_, _) =>

@@ -13,12 +13,16 @@
     <AssemblyName>ClaudeRc</AssemblyName>
     <RootNamespace>ClaudeRc.Tray</RootNamespace>
     <ApplicationIcon>Assets\tray.ico</ApplicationIcon>
+    <!-- The app is English only; leaves out the TaskScheduler package's translated resources. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" />
     <PackageReference Include="H.NotifyIcon.Wpf" />
     <PackageReference Include="Microsoft.Web.WebView2" />
     <PackageReference Include="Microsoft.Toolkit.Uwp.Notifications" />
+    <!-- Task Scheduler (dahall), for the host's scheduled task (SPEC 9); see docs/m4-decisions.md. -->
+    <PackageReference Include="TaskScheduler" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\ClaudeRc.Core\ClaudeRc.Core.csproj" />

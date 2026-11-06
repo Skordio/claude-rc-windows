@@ -41,16 +41,25 @@ internal partial class App
         base.OnStartup(e);
 
         TrayOptions options;
+        string account;
         try
         {
             using var identity = WindowsIdentity.GetCurrent();
+            account = identity.Name;
             options = TrayOptions.Parse(e.Args, identity.User?.Value ?? throw new InvalidOperationException("current user has no SID"));
         }
         catch (ArgumentException ex)
         {
-            MessageBox.Show(ex.Message + "\n\nusage: ClaudeRc.exe [--instance <suffix>] [--unregister-notifications]", "claude-rc-windows",
+            MessageBox.Show(ex.Message + "\n\nusage: ClaudeRc.exe [--instance <suffix>] [--host-exe <path>] [--unregister-notifications]", "claude-rc-windows",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown(2);
+            return;
+        }
+
+        if (options.SetStartMode is { } mode)
+        {
+            // The elevated helper (SPEC 9.2): no tray, no window of its own; it exits with its result.
+            RunStartModeHelper(options, mode);
             return;
         }
 
@@ -82,7 +91,12 @@ internal partial class App
 
         var time = TimeProvider.System;
         var dialogs = new WpfDialogs();
-        var task = new SchtasksHostTask(options.TaskPath);
+        var tasks = new WindowsTaskService();
+        var task = new HostTaskManager(tasks, options.TaskPath);
+        var switcher = new StartModeSwitcher(tasks,
+            new ShellElevation(Environment.ProcessPath ?? throw new InvalidOperationException("no process path")),
+            new StartModeSetup(options.TaskPath, options.HostExe, options.HostArguments, account),
+            (m, restart) => options.HelperArguments(m, account, restart), File.Exists, (delay, ct) => Task.Delay(delay, ct));
         // Between runs of host events the dispatcher handles input and rendering first.
         _connection = new HostConnection(new PipeHostConnector(options.PipeName), time, async () =>
         {
@@ -91,8 +105,8 @@ internal partial class App
             else
                 await Task.Yield();
         });
-        var windows = new WpfWindows(_connection, task, dialogs, options.WebViewDataDir);
-        _vm = new MainViewModel(_connection, task, dialogs, new ShellLauncher(), windows, time, FolderPaths.IsNetworkPath);
+        var windows = new WpfWindows(_connection, task, switcher, dialogs, options.WebViewDataDir);
+        _vm = new MainViewModel(_connection, task, switcher, dialogs, new ShellLauncher(), windows, time, FolderPaths.IsNetworkPath);
         windows.SettingsSaved += async (_, _) => await _vm.LoadTaskInfoAsync();
         _main = new MainWindow(_vm, options.Instance);
         MainWindow = _main;
@@ -108,8 +122,38 @@ internal partial class App
         _toasts = new ToastRouter(_connection, _notifier, path => Dispatcher.BeginInvoke(() => OpenRow(path)));
 
         _connection.Start();
-        _ = _vm.LoadTaskInfoAsync();
         ShowMain();
+        // Reads the task; a portable first run (no task) offers to create the logon task (SPEC 14).
+        _ = _vm.StartupCheckAsync();
+    }
+
+    /// <summary>
+    /// <c>--set-start-mode</c>: the elevated helper the tray starts with UAC (SPEC 9.2). It
+    /// registers the task for <c>--for-user</c> (asking for the password for startup), restarts the
+    /// host if asked, shows its own errors and exits with a <see cref="HelperExitCodes"/> value.
+    /// </summary>
+    private async void RunStartModeHelper(TrayOptions options, StartMode mode)
+    {
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        var dialogs = new WpfDialogs();
+        var code = HelperExitCodes.Failed;
+        try
+        {
+            var setup = new StartModeSetup(options.TaskPath, options.HostExe, options.HostArguments, options.ForUser!);
+            var helper = new StartModeHelper(new WindowsTaskService(), new CredUiPrompt(), dialogs, File.Exists,
+                (delay, ct) => Task.Delay(delay, ct));
+            code = await helper.RunAsync(setup, mode, options.RestartHost);
+        }
+#pragma warning disable CA1031 // The helper reports anything that goes wrong and exits.
+        catch (Exception e)
+#pragma warning restore CA1031
+        {
+            dialogs.ShowError("Start mode", "The start mode could not be changed: " + e.Message);
+        }
+        finally
+        {
+            Shutdown(code);
+        }
     }
 
     private TaskbarIcon CreateTrayIcon(string? instance)

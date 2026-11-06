@@ -17,6 +17,7 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
 {
     private readonly HostConnection _connection;
     private readonly IHostTask _task;
+    private readonly IStartModeSwitcher _switcher;
     private readonly IDialogs _dialogs;
     private readonly IShell _shell;
     private readonly IWindows _windows;
@@ -25,6 +26,7 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     private HostTaskInfo? _taskInfo;
     private string? _pendingFocus;
     private long _pendingFocusSince;
+    private bool _offeredTask;
 
     /// <summary>
     /// How long <see cref="FocusRow"/> waits for a folder that is not in the list yet: a toast click
@@ -35,16 +37,18 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     /// <summary>Creates the view-model and follows <paramref name="connection"/>.</summary>
     /// <param name="connection">The host connection (started by the caller).</param>
     /// <param name="task">The host's scheduled task (Start host, start mode).</param>
+    /// <param name="switcher">Sets the start mode (first run, re-enter password).</param>
     /// <param name="dialogs">Message boxes and the folder picker.</param>
     /// <param name="shell">Explorer and Windows Terminal.</param>
     /// <param name="windows">The other windows.</param>
     /// <param name="time">Clock for the restart countdowns.</param>
     /// <param name="isNetworkPath">Whether a picked folder is on a network or mapped drive (SPEC 3.2).</param>
-    public MainViewModel(HostConnection connection, IHostTask task, IDialogs dialogs, IShell shell, IWindows windows,
+    public MainViewModel(HostConnection connection, IHostTask task, IStartModeSwitcher switcher, IDialogs dialogs, IShell shell, IWindows windows,
         TimeProvider time, Func<string, bool> isNetworkPath)
     {
         _connection = connection;
         _task = task;
+        _switcher = switcher;
         _dialogs = dialogs;
         _shell = shell;
         _windows = windows;
@@ -53,6 +57,7 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
 
         AddFolderCommand = new AsyncRelayCommand(AddFolderAsync);
         StartHostCommand = new AsyncRelayCommand(StartHostAsync);
+        ReenterPasswordCommand = new AsyncRelayCommand(ReenterPasswordAsync);
         SettingsCommand = new RelayCommand(_windows.OpenSettings);
 
         _connection.StateChanged += (_, _) => OnStateChanged();
@@ -86,8 +91,8 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     /// <summary>Host state for the status bar.</summary>
     public string HostStatusText => _connection.StateText;
 
-    /// <summary>Start mode for the status bar (from the task; unknown until M4).</summary>
-    public string StartModeText => "Start mode: " + StartModeName(_taskInfo?.StartMode ?? StartMode.Unknown);
+    /// <summary>Start mode and task health for the status bar (SPEC 3.1).</summary>
+    public string StartModeText => DescribeTask(_taskInfo);
 
     /// <summary>claude path and version (or why claude was not found), from <c>settings.get</c>'s info.</summary>
     public string ClaudeText => _connection.Info is { } info ? "claude: " + DescribeClaude(info) : "claude: unknown";
@@ -118,11 +123,72 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
         return info.ClaudeError ?? "not found";
     }
 
+    /// <summary>Start mode and task health for the status bar (SPEC 3.1), e.g. <c>Start mode: at logon · running</c>.</summary>
+    public static string DescribeTask(HostTaskInfo? info) => info switch
+    {
+        null => "Start mode: unknown",
+        { State: HostTaskState.Missing } => "Start mode: no scheduled task",
+        { State: HostTaskState.Unknown, Error: { } error } => $"Start mode: unknown (the task could not be read: {error})",
+        { State: HostTaskState.Unknown } => "Start mode: unknown (the task could not be read)",
+        _ => $"Start mode: {StartModeName(info.StartMode)} · {info.Health}",
+    };
+
+    /// <summary>The startup task needs the Windows password again (SPEC 9.2): shows Re-enter password.</summary>
+    public bool ShowReenterPassword => _taskInfo?.NeedsPassword == true;
+
+    /// <summary>Re-enter password.</summary>
+    public IAsyncRelayCommand ReenterPasswordCommand { get; }
+
+    /// <summary>
+    /// Re-enter password: runs the startup flow again (UAC and the credential prompt). A host that
+    /// is not connected could not start, so the task runs again at once.
+    /// </summary>
+    public Task ReenterPasswordAsync() => SwitchAsync(StartMode.Startup, "Re-enter password");
+
+    /// <summary>
+    /// At startup: reads the task and, when there is none (the portable zip's first run, SPEC 14),
+    /// offers to create the logon task. Asked once per run of the tray.
+    /// </summary>
+    public async Task StartupCheckAsync()
+    {
+        await LoadTaskInfoAsync();
+        if (_taskInfo?.State != HostTaskState.Missing || _offeredTask)
+            return;
+        _offeredTask = true;
+        if (!_dialogs.Confirm("Start the host at logon",
+                $"No scheduled task starts the claude-rc-windows host ({_taskInfo.TaskPath}), so it doesn't start by itself.\n\n" +
+                "Create it now, so the host starts when you sign in? This needs no administrator rights. " +
+                "You can switch to starting before logon in Settings."))
+            return;
+        await SwitchAsync(StartMode.Logon, "Start the host at logon");
+    }
+
+    private async Task SwitchAsync(StartMode mode, string title)
+    {
+        // A host that answers keeps running (the new mode applies from its next start); one that
+        // does not is started through the task now.
+        var run = !IsHostConnected;
+        var result = await _switcher.SwitchAsync(mode, run);
+        switch (result.Outcome)
+        {
+            case SwitchOutcome.Failed:
+                _dialogs.ShowError(title, result.Message ?? "The start mode could not be changed.");
+                break;
+            case SwitchOutcome.Done when result.Message is { } note:
+                _dialogs.ShowInfo(title, note);
+                break;
+        }
+        if (result.Outcome == SwitchOutcome.Done && run)
+            _connection.ReconnectNow();
+        await LoadTaskInfoAsync();
+    }
+
     /// <summary>Reads the scheduled task's state for the status bar.</summary>
     public async Task LoadTaskInfoAsync()
     {
         _taskInfo = await _task.GetInfoAsync();
         OnPropertyChanged(nameof(StartModeText));
+        OnPropertyChanged(nameof(ShowReenterPassword));
     }
 
     /// <summary>

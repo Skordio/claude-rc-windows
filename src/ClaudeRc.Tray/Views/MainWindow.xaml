@@ -37,6 +37,9 @@
                   Visibility="{Binding ShowStartHost, Converter={StaticResource BoolToVisibility}}" />
           <TextBlock Text="  |  " Foreground="{StaticResource MutedText}" VerticalAlignment="Center" />
           <TextBlock Text="{Binding StartModeText}" VerticalAlignment="Center" />
+          <Button Content="Re-enter password" Command="{Binding ReenterPasswordCommand}" Margin="8,0,0,0" Padding="8,1"
+                  ToolTip="Task Scheduler could not start the host because your Windows password changed."
+                  Visibility="{Binding ShowReenterPassword, Converter={StaticResource BoolToVisibility}}" />
           <TextBlock Text="  |  " Foreground="{StaticResource MutedText}" VerticalAlignment="Center" />
         </StackPanel>
         <TextBlock Text="{Binding ClaudeText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"

@@ -19,7 +19,7 @@ section 2 are hard rules.
 | VT emulator | Chosen in M1 (SPEC §13). Candidates: XtermSharp, a port of the Windows Terminal VT parser, or a small in-repo screen model. It must handle: CSI cursor moves, erase, SGR, scroll regions, the alternate screen, and 5,000 lines of scrollback, and serialise the screen back to VT for replay. Record the choice and the reason in `docs/m1-decisions.md`. |
 | Tray icon | `H.NotifyIcon.Wpf` (or WinForms `NotifyIcon` if that package is a problem). Folder picker: WPF `Microsoft.Win32.OpenFolderDialog`. |
 | Toasts | `Microsoft.Toolkit.Uwp.Notifications` (unpackaged app; the AUMID comes from the Start menu shortcut). |
-| Task Scheduler | `TaskScheduler` (dahall), as in the spec. |
+| Task Scheduler | `TaskScheduler` (dahall), as in the spec, for registering, reading, running and stopping the task; the task definition itself is XML the app builds (M4, `docs/m4-decisions.md` 1). |
 | Debug client | `tools/ClaudeRc.DebugCli`: pipe client for M1 testing. Internal tool, never shipped (SPEC §15: no CLI in v1). |
 | Branch | All work on `impl/v1`, one commit or more per milestone, pushed after each milestone. A PR to `main` at the end. |
 

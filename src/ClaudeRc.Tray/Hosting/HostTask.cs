@@ -1,12 +1,12 @@
-using System.ComponentModel;
-using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace ClaudeRc.Tray.Hosting;
 
-/// <summary>When the host starts (SPEC 2, 9). <see cref="Unknown"/> until M4 reads it from the task.</summary>
+/// <summary>When the host starts (SPEC 2, 9).</summary>
 internal enum StartMode
 {
-    /// <summary>Not known (M2: the task is not read yet).</summary>
+    /// <summary>Not known: no task, or a task that is neither (changed by hand).</summary>
     Unknown,
 
     /// <summary>At logon of this user (9.1).</summary>
@@ -29,19 +29,79 @@ internal enum HostTaskState
     Missing,
 }
 
-/// <summary>What the tray knows about the host's scheduled task.</summary>
+/// <summary>What the tray knows about the host's scheduled task (SPEC 3.1 status bar, 3.4 task status).</summary>
 /// <param name="State">Whether it exists.</param>
 /// <param name="StartMode">Its trigger.</param>
 /// <param name="TaskPath">Its full name, e.g. <c>\claude-rc-windows\Host</c>.</param>
 internal sealed record HostTaskInfo(HostTaskState State, StartMode StartMode, string TaskPath)
 {
-    /// <summary>For the settings window: <c>exists</c>, <c>missing</c> or <c>unknown</c>, with the task name.</summary>
+    /// <summary>SCHED_S_TASK_TERMINATED: the last run was stopped (by the user, or for a restart).</summary>
+    private const int Terminated = 0x41306;
+
+    /// <summary>The task is enabled.</summary>
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>An instance of the task is running.</summary>
+    public bool Running { get; init; }
+
+    /// <summary>The last run's result, as Task Scheduler reports it.</summary>
+    public int? LastResult { get; init; }
+
+    /// <summary>When it last ran.</summary>
+    public DateTime? LastRunTime { get; init; }
+
+    /// <summary>When it runs next (logon and boot triggers have no time).</summary>
+    public DateTime? NextRunTime { get; init; }
+
+    /// <summary>Why the task could not be read (<see cref="HostTaskState.Unknown"/>).</summary>
+    public string? Error { get; init; }
+
+    /// <summary>
+    /// A startup task whose last start failed with a logon failure: the Windows password changed,
+    /// so Task Scheduler can't start the host until it is entered again (SPEC 9.2).
+    /// </summary>
+    public bool NeedsPassword =>
+        State == HostTaskState.Exists && StartMode == StartMode.Startup && LastResult == HostTaskDefinition.LogonFailure;
+
+    /// <summary>The task's health in a few words, for an existing task (the status bar).</summary>
+    public string Health
+    {
+        get
+        {
+            if (NeedsPassword)
+                return "re-enter your password";
+            if (!Enabled)
+                return "disabled";
+            if (Running)
+                return "running";
+            return LastResult switch
+            {
+                null or 0 or HostTaskDefinition.HasNotRun or HostTaskDefinition.TaskIsRunning or Terminated => "ready",
+                // ClaudeRcHost's AlreadyRunning: it met another host's single-instance mutex (SPEC 9.4).
+                3 => "last run ended with exit code 3: another host was already running",
+                >= 0 and <= 255 and var code => $"last run ended with exit code {code}",
+                var code => $"last run failed (0x{code:X8})",
+            };
+        }
+    }
+
+    /// <summary>For the settings window: the health and the task's name, with the last and next run.</summary>
     public string StatusText => State switch
     {
-        HostTaskState.Exists => $"exists ({TaskPath})",
+        HostTaskState.Exists => $"{Health} ({TaskPath})" + Times(),
         HostTaskState.Missing => $"missing ({TaskPath})",
-        _ => $"unknown ({TaskPath})",
+        _ => $"unknown ({TaskPath})" + (Error is null ? "" : ": " + Error),
     };
+
+    private string Times()
+    {
+        var text = "";
+        if (LastRunTime is { } last)
+            text += ", last run " + last.ToString("g", CultureInfo.CurrentCulture);
+        if (NextRunTime is { } next)
+            text += ", next run " + next.ToString("g", CultureInfo.CurrentCulture);
+        return text;
+    }
 }
 
 /// <summary>Result of <see cref="IHostTask.RunAsync"/>.</summary>
@@ -55,123 +115,82 @@ internal sealed record StartHostResult(bool Ok, string? Error)
     /// <summary>There is no task to run. The host is never started as the tray's own child (SPEC 9.4).</summary>
     public static StartHostResult Missing(string taskPath) => new(false,
         $"The scheduled task {taskPath} does not exist, so the host cannot be started from here. " +
-        "The installer creates it; until then, start ClaudeRcHost.exe yourself.");
+        "Choose a start mode in Settings to create it.");
 
     /// <summary>Running the task failed.</summary>
     public static StartHostResult Failed(string message) => new(false, message);
 }
 
-/// <summary>
-/// The host's scheduled task (SPEC 9). M2 only checks that it exists and runs it; M4 creates it,
-/// switches the start mode and reports its health.
-/// </summary>
+/// <summary>The host's scheduled task (SPEC 9): its state and health, and Start host.</summary>
 internal interface IHostTask
 {
-    /// <summary>Reads the task's state and start mode.</summary>
+    /// <summary>Reads the task's state, start mode and health.</summary>
     Task<HostTaskInfo> GetInfoAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Runs the task (the Start host button, SPEC 9.4).</summary>
     Task<StartHostResult> RunAsync(CancellationToken cancellationToken = default);
 }
 
-/// <summary>
-/// M2's <see cref="IHostTask"/>: <c>schtasks.exe /Query</c> and <c>/Run</c>. The start mode stays
-/// <see cref="StartMode.Unknown"/> until M4 replaces this with the TaskScheduler library.
-/// </summary>
+/// <summary><see cref="IHostTask"/> over Task Scheduler (<see cref="ITaskService"/>). Calls run on the thread pool.</summary>
+/// <param name="tasks">Task Scheduler.</param>
 /// <param name="taskPath">The task's full name (<see cref="TrayOptions.TaskPath"/>).</param>
-internal sealed class SchtasksHostTask(string taskPath) : IHostTask
+internal sealed class HostTaskManager(ITaskService tasks, string taskPath) : IHostTask
 {
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
+    /// <inheritdoc/>
+    public Task<HostTaskInfo> GetInfoAsync(CancellationToken cancellationToken = default) =>
+        Task.Run(Read, cancellationToken);
 
     /// <inheritdoc/>
-    public async Task<HostTaskInfo> GetInfoAsync(CancellationToken cancellationToken = default)
+    public Task<StartHostResult> RunAsync(CancellationToken cancellationToken = default) => Task.Run(() =>
     {
-        var (code, _) = await RunSchtasks(["/Query", "/TN", taskPath], cancellationToken).ConfigureAwait(false);
-        var state = code switch
+        var info = Read();
+        switch (info.State)
         {
-            0 => HostTaskState.Exists,
-            1 => HostTaskState.Missing,
-            _ => HostTaskState.Unknown,
-        };
-        return new HostTaskInfo(state, StartMode.Unknown, taskPath);
-    }
-
-    /// <inheritdoc/>
-    public async Task<StartHostResult> RunAsync(CancellationToken cancellationToken = default)
-    {
-        var info = await GetInfoAsync(cancellationToken).ConfigureAwait(false);
-        if (info.State == HostTaskState.Missing)
-            return StartHostResult.Missing(taskPath);
-        var (code, output) = await RunSchtasks(["/Run", "/TN", taskPath], cancellationToken).ConfigureAwait(false);
-        return code == 0
-            ? StartHostResult.Started
-            : StartHostResult.Failed($"Could not run the scheduled task {taskPath}: {output.Trim()}");
-    }
-
-    private static Task<(int Code, string Output)> RunSchtasks(string[] args, CancellationToken cancellationToken)
-    {
-        var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "schtasks.exe"))
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        foreach (var a in args)
-            psi.ArgumentList.Add(a);
-        return RunProcessAsync(psi, Timeout, cancellationToken);
-    }
-
-    /// <summary>
-    /// Runs a process with redirected output and returns its exit code and output, or -1 and the
-    /// error. A process still running after <paramref name="timeout"/> (or when the caller cancels)
-    /// is killed with its children, so a hung schtasks.exe is not left behind.
-    /// </summary>
-    /// <param name="psi">What to start (with both outputs redirected).</param>
-    /// <param name="timeout">How long it may run.</param>
-    /// <param name="cancellationToken">Stops waiting, and kills the process.</param>
-    /// <param name="started">Called with the process once it runs (tests).</param>
-    internal static async Task<(int Code, string Output)> RunProcessAsync(ProcessStartInfo psi, TimeSpan timeout,
-        CancellationToken cancellationToken, Action<Process>? started = null)
-    {
-        ArgumentNullException.ThrowIfNull(psi);
-        Process p;
+            case HostTaskState.Missing:
+                return StartHostResult.Missing(taskPath);
+            case HostTaskState.Exists when !info.Enabled:
+                return StartHostResult.Failed(
+                    $"The scheduled task {taskPath} is disabled, so it can't start the host. Enable it in Task Scheduler, or choose a start mode in Settings to create it again.");
+        }
         try
         {
-            p = Process.Start(psi) ?? throw new InvalidOperationException($"{Path.GetFileName(psi.FileName)} did not start");
+            tasks.Run(taskPath);
+            return StartHostResult.Started;
         }
-        catch (Exception e) when (e is Win32Exception or InvalidOperationException)
+        catch (FileNotFoundException)
         {
-            return (-1, e.Message);
+            return StartHostResult.Missing(taskPath);
         }
-        using (p)
+        catch (Exception e) when (IsTaskSchedulerError(e))
         {
-            started?.Invoke(p);
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(timeout);
-            try
-            {
-                var stdout = p.StandardOutput.ReadToEndAsync(cts.Token);
-                var stderr = p.StandardError.ReadToEndAsync(cts.Token);
-                await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
-                return (p.ExitCode, await stdout.ConfigureAwait(false) + await stderr.ConfigureAwait(false));
-            }
-            catch (OperationCanceledException e)
-            {
-                try
-                {
-                    p.Kill(entireProcessTree: true);
-                }
-                catch (Exception kill) when (kill is Win32Exception or InvalidOperationException or NotSupportedException)
-                {
-                    // Exited meanwhile, or cannot be killed: nothing more to do.
-                }
-                return (-1, e.Message);
-            }
-            catch (Exception e) when (e is Win32Exception or InvalidOperationException)
-            {
-                return (-1, e.Message);
-            }
+            return StartHostResult.Failed($"Could not run the scheduled task {taskPath}: {e.Message}");
         }
+    }, cancellationToken);
+
+    /// <summary>The errors Task Scheduler and the library report (COM errors, access denied, a missing folder, …).</summary>
+    internal static bool IsTaskSchedulerError(Exception e) =>
+        e is ExternalException or UnauthorizedAccessException or IOException or InvalidOperationException or ArgumentException;
+
+    private HostTaskInfo Read()
+    {
+        TaskSnapshot? snapshot;
+        try
+        {
+            snapshot = tasks.Find(taskPath);
+        }
+        catch (Exception e) when (IsTaskSchedulerError(e))
+        {
+            return new HostTaskInfo(HostTaskState.Unknown, StartMode.Unknown, taskPath) { Error = e.Message };
+        }
+        if (snapshot is null)
+            return new HostTaskInfo(HostTaskState.Missing, StartMode.Unknown, taskPath);
+        return new HostTaskInfo(HostTaskState.Exists, HostTaskDefinition.ReadMode(snapshot.Xml), taskPath)
+        {
+            Enabled = snapshot.State != TaskRunState.Disabled,
+            Running = snapshot.State == TaskRunState.Running,
+            LastResult = snapshot.LastResult,
+            LastRunTime = snapshot.LastRunTime,
+            NextRunTime = snapshot.NextRunTime,
+        };
     }
 }

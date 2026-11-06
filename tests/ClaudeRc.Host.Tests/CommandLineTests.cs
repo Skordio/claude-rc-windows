@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using ClaudeRc.Host.Sessions;
+using ClaudeRc.Core.Processes;
 
 namespace ClaudeRc.Host.Tests;
 
@@ -17,6 +17,16 @@ public sealed partial class CommandLineTests
     public void Quotes_one_argument(string arg, string expected)
     {
         Assert.Equal("prog " + expected, CommandLine.Build("prog", [arg]));
+    }
+
+    [Fact]
+    public void Arguments_alone_are_joined_with_the_same_quoting()
+    {
+        Assert.Equal("", CommandLine.JoinArguments([]));
+        Assert.Equal("--instance t1 --data-dir \"C:\\a b\\\\\" \"\"",
+            CommandLine.JoinArguments(["--instance", "t1", "--data-dir", @"C:\a b\", ""]));
+        string[] args = ["--name", "m0 \"q\" & %PATH%", @"trailing\"];
+        Assert.Equal([@"C:\x\prog.exe", .. args], Parse(@"C:\x\prog.exe " + CommandLine.JoinArguments(args)));
     }
 
     [Fact]

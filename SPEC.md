@@ -78,7 +78,11 @@ A single list, one row per folder:
   also shows its last console lines (5.2).
 
 Toolbar: **+ Add folder**, **Settings**. Status bar: host connected / not
-running (with **Start host** button), start mode, claude.exe path and version.
+running (with **Start host** button), start mode with the task's health
+(`Start mode: at logon · running`; health is running, ready, disabled, how the
+last run ended (exit code 3 says another host was already running, 9.4), or
+"re-enter your password" with a **Re-enter password** button, 9.2; "no
+scheduled task" when there is none), claude.exe path and version.
 While no host answers, the list area says so and points at **Start host**.
 
 Closing the window hides it to the tray; sessions keep running. Tray menu:
@@ -121,13 +125,23 @@ forwarded to the pseudo-console.
   and where to get it.
 
 ### 3.4 Settings
-- **Start mode**: At logon (default) / At startup (before logon). Switching
-  re-creates the scheduled task (see 9); `startup` needs admin approval (UAC)
-  and the user's Windows password once.
+- **Start mode**: At logon (default) / At startup (before logon). Choosing the
+  other one and pressing **Save** re-creates the scheduled task (see 9);
+  `startup` needs admin approval (UAC) and the user's Windows password once
+  (9.2). Going back to `logon` needs no admin, unless Task Scheduler refuses
+  to change the administrator-made `startup` task; then it also goes through
+  UAC. While a host answers, Save first asks whether to restart it now so it
+  runs the new way (Yes: the task's host is stopped and the task run, so every
+  ON folder stops and starts again; No: the new mode applies from the host's
+  next start). With no host running, the task is simply run. The start mode can
+  be switched without a host (it is not a host setting); a cancelled or failed
+  switch keeps the window open with the reason. The window also shows "re-enter
+  your password" with a button when 9.2's logon failure is seen.
 - **claude.exe path**: auto-detected (see 6.1); override field + Browse. The
   override must be a full path to a `.exe` or a `claude.cmd` npm shim (6.1).
 - **Notifications**: on/off (default on).
-- Read-only info: data folder, log folder, host version, task status.
+- Read-only info: data folder, log folder, host version, task status (health,
+  task name, last and next run).
 
 The settings live in the host (`settings.get` / `settings.set`, 10), so they
 can be changed only while the host is connected; otherwise the window says
@@ -383,23 +397,46 @@ ends at logoff (sessions with it).
 ### 9.2 `startup`
 Trigger "At startup", "Run whether user is logged on or not", run as the
 user with the password stored by Task Scheduler, "Do not store password" off
-(it needs network and profile access), user profile loaded. Creating it needs
+(it needs network and profile access), user profile loaded (Task Scheduler
+loads it for a password logon; there is no setting for it). Highest privileges
+are not asked for. Creating it needs
 elevation (UAC) and the user's password, entered in a Windows credential
-prompt opened by the tray app; the app never stores or logs it. The host runs
+prompt; the app never stores or logs it. The tray app does this by starting
+itself again elevated (`runas`) as an internal helper,
+`ClaudeRc.exe --set-start-mode startup --for-user <DOMAIN\name> [--restart-host]`
+(not a user-facing CLI, 15). The helper gets the account from the tray, because
+with a standard user UAC runs it as another (administrator) account. It opens
+the credential prompt (`CredUIPromptForWindowsCredentials`, plain user name and
+password fields with the account filled in; only the password is used), and
+passes the password straight to Task Scheduler's registration, which checks
+it: a wrong one (`0x8007052E`) shows the prompt again with "the password was not
+accepted"; Cancel changes nothing. The helper shows its own errors and tells the
+tray the outcome through its exit code. The host runs
 in session 0 (no desktop); ConPTY works there, and the tray app reaches it
 over the named pipe (10). If the Windows password changes, Task Scheduler
 can't start the task: the tray app detects the task's last result
-(`0x8007052E` logon failure) and shows "re-enter your password".
+(`0x8007052E` logon failure) and shows "re-enter your password" with a button
+that runs this flow again (and runs the task, if no host answers).
 
 ### 9.3 Task settings (both modes)
 Start immediately if a scheduled start was missed; don't stop on battery;
 no execution time limit; "If the task fails, restart every 1 minute, up to
 999 times"; "If the task is already running: do not start a new instance".
+Also: normal priority (Task Scheduler's default, 7, is below normal, and every
+`claude rc` would inherit it), may be run on demand (Start host), least
+privilege, the working directory is the program folder. The command is the
+full path of `ClaudeRcHost.exe` in quotes, so a profile path with spaces can't
+be misread.
 
 ### 9.4 Single host
 The host takes a global named mutex `Global\claude-rc-windows-host-<user
 SID>`; a second instance exits at once. The tray app's **Start host** button
 runs the scheduled task (it never starts the host as its own child).
+Restarting the host through the task (3.4) stops the task's running instance,
+waits up to 10 s for that process to end, and only then runs the task: Task
+Scheduler reports the task stopped before the process is gone, and a host
+started in that moment would meet the old one's mutex and exit, leaving none.
+If the old host does not end in time, the task is not run and the app says so.
 
 ### 9.5 Sleep, hibernate and network changes
 After resume the host does nothing special: `claude rc` reconnects on its own
@@ -430,7 +467,7 @@ Requests (tray → host), each with an `id`; the host replies
 | `resize` | `path`, `cols`, `rows` | |
 | `detach` | `path` | Stop streaming. |
 | `log` | `path`, `lines` | Return the last N lines of the folder log. |
-| `settings.get` / `settings.set` | | claude path, notifications (start mode is changed by the tray app through Task Scheduler, then the host reloads). |
+| `settings.get` / `settings.set` | | claude path, notifications (start mode is not a host setting: the tray app changes it through Task Scheduler, and the host is restarted only if the user agrees, 3.4). |
 
 Events (host → tray, no `id`), named by an `event` field: `rows` (pushed on
 any status change), `output` (`path`, base64 bytes in `data`, while attached),
@@ -519,7 +556,10 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
   `%LOCALAPPDATA%\claude-rc-windows\webview2`; asks
   whether to keep `%APPDATA%\claude-rc-windows`. Never touches `.claude.json`.
 - **Portable zip**: same exes; first run of the tray app offers to create the
-  `logon` task.
+  `logon` task: whenever the tray starts and finds no task, it asks once (no
+  admin needed). Yes creates it and, if no host answers, runs it; No asks again
+  at the tray's next start. The task runs the `ClaudeRcHost.exe` next to
+  `ClaudeRc.exe`.
 - Built by GitHub Actions on tags `v*`: test, publish x64 and arm64, build the
   installers, attach everything to the GitHub Release with SHA-256 sums.
 - Unsigned in v1. The README explains SmartScreen's "Windows protected your

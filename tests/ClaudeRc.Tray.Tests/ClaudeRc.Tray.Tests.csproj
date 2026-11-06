@@ -15,10 +15,13 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+    <PackageReference Include="TaskScheduler" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\ClaudeRc.Core\ClaudeRc.Core.csproj" />
     <ProjectReference Include="..\..\src\ClaudeRc.Tray\ClaudeRc.Tray.csproj" />
+    <!-- Built first and copied next to the tests: the task integration test runs a test host through Task Scheduler. -->
+    <ProjectReference Include="..\..\src\ClaudeRc.Host\ClaudeRc.Host.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
