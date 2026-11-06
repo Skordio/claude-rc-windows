@@ -233,6 +233,20 @@ public class FolderRowViewModelTests
     }
 
     [Theory]
+    [InlineData(true, "Turn off ")]
+    [InlineData(false, "Turn on ")]
+    public void Row_buttons_have_accessible_names_with_the_folder_name(bool on, string togglePrefix)
+    {
+        var vm = Vm(on ? FolderStatus.Running : FolderStatus.Off, on, saved: true);
+
+        Assert.Equal("Show " + vm.Name, vm.ShowAccessibleName);
+        Assert.Equal(togglePrefix + vm.Name, vm.ToggleAccessibleName);
+        Assert.Equal("More actions for " + vm.Name, vm.MoreAccessibleName);
+        Assert.Equal("Take over " + vm.Name, vm.TakeOverAccessibleName);
+        Assert.Equal("Restart " + vm.Name, vm.RestartAccessibleName);
+    }
+
+    [Theory]
     [InlineData(FolderStatus.External, true)]
     [InlineData(FolderStatus.Running, true)]
     [InlineData(FolderStatus.Off, false)]

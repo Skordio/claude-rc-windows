@@ -122,7 +122,8 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     {
         ArgumentNullException.ThrowIfNull(info);
         if (info.ClaudePath is { } path)
-            return info.ClaudeVersion is { } version ? $"{path} · {version}" : path;
+            // Version first: the status bar trims the end, and the version must stay visible.
+            return info.ClaudeVersion is { } version ? $"{version} · {path}" : path;
         return info.ClaudeError ?? "not found";
     }
 

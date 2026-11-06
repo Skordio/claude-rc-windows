@@ -177,7 +177,9 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>The task's start mode in words.</summary>
-    public string StartModeText => MainViewModel.StartModeName(CurrentMode);
+    public string StartModeText => _taskInfo?.State == HostTaskState.Missing
+        ? "no scheduled task"
+        : MainViewModel.StartModeName(CurrentMode);
 
     /// <summary>The mode the task has now (unknown without a task).</summary>
     private StartMode CurrentMode => _taskInfo?.State == HostTaskState.Exists ? _taskInfo.StartMode : StartMode.Unknown;

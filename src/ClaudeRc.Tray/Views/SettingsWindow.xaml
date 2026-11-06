@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:ClassModifier="internal"
-        Title="Settings - claude-rc-windows" Width="620" SizeToContent="Height" ResizeMode="NoResize"
+        Title="Settings - claude-rc-windows" Width="720" MinWidth="520" SizeToContent="Height" ResizeMode="CanResizeWithGrip"
         WindowStartupLocation="CenterOwner" Icon="/Assets/tray.ico" ShowInTaskbar="True">
   <StackPanel Margin="16">
     <!-- Start mode (SPEC 3.4, 9): Save re-creates the scheduled task. -->
@@ -26,7 +26,20 @@
       <Button DockPanel.Dock="Right" Content="Browse…" Padding="10,2" Margin="6,0,0,0" Command="{Binding BrowseCommand}"
               IsEnabled="{Binding CanEdit}" />
       <TextBox Text="{Binding ClaudePathOverride, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanEdit}"
-               AutomationProperties.Name="claude.exe path" VerticalContentAlignment="Center" Padding="2" />
+               AutomationProperties.Name="claude.exe path" VerticalContentAlignment="Center" Padding="2"
+               ToolTipService.ShowOnDisabled="True">
+        <!-- The full path as a tooltip, since a long one is cut off in the box (none when empty). -->
+        <TextBox.Style>
+          <Style TargetType="TextBox">
+            <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}" />
+            <Style.Triggers>
+              <Trigger Property="Text" Value="">
+                <Setter Property="ToolTip" Value="{x:Null}" />
+              </Trigger>
+            </Style.Triggers>
+          </Style>
+        </TextBox.Style>
+      </TextBox>
     </DockPanel>
     <TextBlock Margin="0,2,0,0" Foreground="{StaticResource MutedText}" TextWrapping="Wrap">
       <Run Text="Leave empty to find claude automatically. A full path to claude.exe or claude.cmd. In use now: " />
@@ -61,6 +74,14 @@
           <Setter Property="BorderThickness" Value="0" />
           <Setter Property="Background" Value="Transparent" />
           <Setter Property="Margin" Value="0,1" />
+          <!-- Long folder paths wrap instead of being cut off; the tooltip has the full text too. -->
+          <Setter Property="TextWrapping" Value="Wrap" />
+          <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}" />
+          <Style.Triggers>
+            <Trigger Property="Text" Value="">
+              <Setter Property="ToolTip" Value="{x:Null}" />
+            </Trigger>
+          </Style.Triggers>
         </Style>
         <Style TargetType="TextBlock">
           <Setter Property="Margin" Value="0,1,12,1" />

@@ -100,7 +100,8 @@ public sealed class MainViewModelTests : IAsyncDisposable
     {
         await Connect();
         await Eventually.True(() => _vm.ClaudeText.Contains("2.1.318", StringComparison.Ordinal), "claude text");
-        Assert.Equal(@"claude: C:\bin\claude.exe · 2.1.318 (Claude Code)", _vm.ClaudeText);
+        // Version first, so trimming the end of the status bar never hides it.
+        Assert.Equal(@"claude: 2.1.318 (Claude Code) · C:\bin\claude.exe", _vm.ClaudeText);
     }
 
     [Fact]
