@@ -202,7 +202,10 @@ confirmation). M3 adds:
   or a session inside the tree: nothing stopped; a PID that now names a process the host may not
   terminate: counts as stopped; the scanned process itself not terminable: error; the last two
   use a test FakeClaude whose DACL grants only query). Seen failing first (stubs, or the old open
-  logic). Take-over tests now wait on a handle to the child opened while it ran, not on its bare
+  logic). Those two run the stopper on a thread impersonating the test's token with SeDebugPrivilege
+  removed, and first check that the FakeClaude cannot be opened to terminate it: the GitHub runner
+  is elevated with SeDebugPrivilege enabled, which ignores the DACL. The host never enables that
+  privilege; an elevated host that has it may simply stop such a process, which SPEC 7 allows. Take-over tests now wait on a handle to the child opened while it ran, not on its bare
   PID, which the hosted session started next could reuse.
 - Tray: 10 new test cases (251 → 261); the new properties' tests failed to compile before the properties existed.
 - Every Host test still checks that no FakeClaude is left running.

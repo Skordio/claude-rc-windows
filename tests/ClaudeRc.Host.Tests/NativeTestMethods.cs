@@ -32,6 +32,116 @@ internal static partial class NativeTestMethods
         }
     }
 
+    /// <summary>
+    /// Runs <paramref name="action"/> on a thread of its own that impersonates this process's token
+    /// with SeDebugPrivilege removed, as the host runs (it never enables it). An elevated test
+    /// runner (the GitHub runner) may have it enabled, and with it OpenProcess ignores the DACL that
+    /// <see cref="AllowOnlyQuery"/> sets. Only that thread changes: other tests running at the same
+    /// time keep the process token.
+    /// </summary>
+    internal static unsafe T WithoutDebugPrivilege<T>(Func<T> action)
+    {
+        const int SecurityImpersonation = 2;
+        const uint TokenAdjustPrivileges = 0x20, TokenQuery = 0x8, PrivilegeRemoved = 0x4;
+        const int ErrorNotAllAssigned = 1300;
+        T result = default!;
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                if (!ImpersonateSelf(SecurityImpersonation))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError(), "ImpersonateSelf failed");
+                try
+                {
+                    if (!OpenThreadToken(GetCurrentThread(), TokenAdjustPrivileges | TokenQuery, true, out var token))
+                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError(), "OpenThreadToken failed");
+                    try
+                    {
+                        if (!LookupPrivilegeValueW(null, "SeDebugPrivilege", out var luid))
+                            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError(), "LookupPrivilegeValue failed");
+                        var privileges = new TokenPrivileges { Count = 1, Luid = luid, Attributes = PrivilegeRemoved };
+                        // Not held at all (a non-elevated token): ERROR_NOT_ALL_ASSIGNED, which is fine.
+                        if (!AdjustTokenPrivileges(token, false, &privileges, 0, 0, 0))
+                            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError(), "AdjustTokenPrivileges failed");
+                        var error = Marshal.GetLastPInvokeError();
+                        if (error != 0 && error != ErrorNotAllAssigned)
+                            throw new System.ComponentModel.Win32Exception(error, "AdjustTokenPrivileges failed");
+                    }
+                    finally
+                    {
+                        CloseHandle(token);
+                    }
+                    result = action();
+                }
+                finally
+                {
+                    RevertToSelf();
+                }
+            }
+#pragma warning disable CA1031 // rethrown on the calling thread
+            catch (Exception e)
+#pragma warning restore CA1031
+            {
+                failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e);
+            }
+        });
+        thread.Start();
+        thread.Join();
+        failure?.Throw();
+        return result;
+    }
+
+    /// <summary>Whether the calling thread can open process <paramref name="pid"/> with the right to terminate it.</summary>
+    internal static bool CanOpenToTerminate(int pid)
+    {
+        const uint ProcessTerminate = 0x1;
+        var handle = OpenProcess(ProcessTerminate, false, (uint)pid);
+        if (handle == 0)
+            return false;
+        CloseHandle(handle);
+        return true;
+    }
+
+    /// <summary>TOKEN_PRIVILEGES with one LUID_AND_ATTRIBUTES (the LUID is only 4-byte aligned).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct TokenPrivileges
+    {
+        public uint Count;
+        public long Luid;
+        public uint Attributes;
+    }
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool ImpersonateSelf(int impersonationLevel);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool RevertToSelf();
+
+    [LibraryImport("kernel32.dll")]
+    private static partial nint GetCurrentThread();
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool OpenThreadToken(nint thread, uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool openAsSelf, out nint token);
+
+    [LibraryImport("advapi32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool LookupPrivilegeValueW(string? systemName, string name, out long luid);
+
+    [LibraryImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static unsafe partial bool AdjustTokenPrivileges(nint token, [MarshalAs(UnmanagedType.Bool)] bool disableAll, TokenPrivileges* newState, uint bufferLength, nint previousState, nint returnLength);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial nint OpenProcess(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(nint handle);
+
     [LibraryImport("advapi32.dll")]
     private static partial uint SetSecurityInfo(nint handle, uint objectType, uint securityInfo, nint owner, nint group, nint dacl, nint sacl);
 

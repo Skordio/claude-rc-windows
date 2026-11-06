@@ -127,7 +127,7 @@ public sealed class ExternalStopperTests : IDisposable
         NativeTestMethods.AllowOnlyQuery(external.Handle);
         var target = found with { StartTime = found.StartTime - 1 };
 
-        var outcome = ExternalStopper.Stop(target, _matcher, TimeSpan.FromSeconds(1), None);
+        var outcome = StopWithoutDebugPrivilege(target);
 
         Assert.True(outcome.Stopped, outcome.Error);
         Assert.Equal(0, outcome.Terminated);
@@ -141,10 +141,23 @@ public sealed class ExternalStopperTests : IDisposable
         var target = Found(external);
         NativeTestMethods.AllowOnlyQuery(external.Handle);
 
-        var outcome = ExternalStopper.Stop(target, _matcher, TimeSpan.FromSeconds(1), None);
+        var outcome = StopWithoutDebugPrivilege(target);
 
         Assert.False(outcome.Stopped);
         Assert.Contains("administrator", outcome.Error, StringComparison.Ordinal);
         Assert.True(external.IsRunning);
     }
+
+    /// <summary>
+    /// Stops <paramref name="target"/> as the host would, without SeDebugPrivilege, which an elevated
+    /// test runner may have enabled and which would let it terminate a process whose DACL grants only
+    /// query. Checks first that the process really cannot be opened to terminate it.
+    /// </summary>
+    private StopOutcome StopWithoutDebugPrivilege(ExternalSession target) =>
+        NativeTestMethods.WithoutDebugPrivilege(() =>
+        {
+            Assert.False(NativeTestMethods.CanOpenToTerminate(target.Pid),
+                "test setup: the process whose DACL grants only query can still be opened to terminate it");
+            return ExternalStopper.Stop(target, _matcher, TimeSpan.FromSeconds(1), None);
+        });
 }
