@@ -15,7 +15,7 @@ public abstract record IpcMessage
 
 /// <summary>
 /// One row of the main window (SPEC 10): <c>{path, name, on, saved, status, prompt?,
-/// exit_code?, restart_in_s?, crashes_10m, started_at?, pid?, error?}</c>. Optional fields are
+/// exit_code?, restart_in_s?, crashes_10m, started_at?, pid?, error?, last_lines?}</c>. Optional fields are
 /// omitted when null.
 /// </summary>
 public sealed record Row
@@ -44,6 +44,11 @@ public sealed record Row
     [JsonPropertyName("pid")] public int? Pid { get; init; }
     /// <summary>Why the folder cannot be started (claude not found, <c>.claude.json</c> invalid, …).</summary>
     [JsonPropertyName("error")] public string? Error { get; init; }
+    /// <summary>
+    /// The last console lines (at most 20) of the session that exited last, while
+    /// <see cref="FolderStatus.Failing"/> (SPEC 5.2). Filled in by the host, not the supervisor.
+    /// </summary>
+    [JsonPropertyName("last_lines")] public IReadOnlyList<string>? LastLines { get; init; }
 }
 
 /// <summary>A request from the tray app; the host answers with an <see cref="IpcResponse"/> carrying the same <see cref="Id"/>.</summary>

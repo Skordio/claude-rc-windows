@@ -22,13 +22,15 @@ public sealed class IpcTests
             StartedAt = new DateTimeOffset(2026, 11, 6, 10, 13, 14, TimeSpan.Zero),
             Pid = 4242,
             Error = "boom",
+            LastLines = ["line 1", "line 2"],
         };
 
         var json = JsonNode.Parse(IpcCodec.Encode(new RowsEvent([row])))!["rows"]![0]!.AsObject();
 
         Assert.Equal(
-            ["path", "name", "on", "saved", "status", "prompt", "exit_code", "restart_in_s", "crashes_10m", "started_at", "pid", "error"],
+            ["path", "name", "on", "saved", "status", "prompt", "exit_code", "restart_in_s", "crashes_10m", "started_at", "pid", "error", "last_lines"],
             json.Select(p => p.Key));
+        Assert.Equal(["line 1", "line 2"], json["last_lines"]!.AsArray().Select(n => (string)n!));
         Assert.Equal(@"C:\src\app", (string)json["path"]!);
         Assert.Equal("restarting", (string)json["status"]!);
         Assert.Equal(-1073741510, (int)json["exit_code"]!);

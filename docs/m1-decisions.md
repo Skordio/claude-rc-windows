@@ -1,7 +1,8 @@
 # M1 decisions
 
 Decisions made while implementing M1 that SPEC.md and PLAN.md leave open. Part A (Core)
-decisions are listed as deviations in SPEC.md itself; this file covers the host's session layer.
+decisions are listed as deviations in SPEC.md itself; this file covers the host: its session layer,
+the host process, the pipe server, the test seams and the debug CLI.
 
 ## 1. Headless VT emulator: a small in-repo screen model
 
@@ -130,13 +131,103 @@ the top of its `Program.cs`. They let a test:
 - record argv, cwd, pid, chosen environment variables and a child's pid;
 - spawn a child (in its own hidden console, ignoring Ctrl+C);
 - replay a fixture `.raw` file, print text, and print a prompt;
-- append each input line to a file;
+- append each input line to a file. Input is read key by key with `ReadKey` and echoed by FakeClaude
+  itself, as a raw-mode program such as claude does. conhost's cooked line input (`ReadLine`) now
+  and then dropped a whole line written right after the previous one had been read, which made
+  the input tests flaky (about one run in three). Ctrl+C is still a signal;
 - append console sizes to a file;
 - log or ignore Ctrl+C;
-- exit with a code after a delay.
+- exit with a code after a delay;
+- answer `--version` (`0.0.0-fake (Claude Code)`), for the `settings.get` info.
 
 It switches its console to UTF-8 and VT processing, as claude does.
 
 Host integration tests run one at a time (`DisableTestParallelization`). Each one checks on
 dispose that no `FakeClaude.exe` from the test output folder is still running. They never look
 at, or kill, any other process.
+
+## 5. The host process (`src/ClaudeRc.Host/HostApp.cs`, `Program.cs`)
+
+- **`Program`** parses the PLAN 2.2 options, takes the single-instance mutex
+  (`SingleInstance`, `Global\claude-rc-windows-host-<SID>[-instance]`, ACL user + SYSTEM) and runs
+  a `HostApp` until it fails. Exit codes (`HostExitCodes`): 0 stopped, 1 failed (see host.log),
+  2 bad arguments, 3 another host holds the mutex. There is no "quit" request in SPEC 10, so in
+  production the host runs until its logon session ends or it is killed; its sessions then die with
+  their Job Objects (SPEC 6.5, pinned by `HostProcessTests`). `HostApp.DisposeAsync` is the
+  graceful quit of SPEC 6.4 (Ctrl+C every session, wait, kill), used by the in-process tests.
+- **One lock** guards the `Supervisor`, the sessions and the clients' viewer state. Each input
+  (pipe request, session exit, prompt-scan result, clock tick) takes it, calls the supervisor and
+  carries out the effects in order. A `StartSession` effect runs the presets (6.2), the locator (6.1)
+  and `Session.Start` (6.3), then feeds `SessionStarted` or `StartFailed` back in the same pass. Any
+  exception during a start becomes `StartFailed`, so a folder can never stay "launching". Stops
+  run on their own task (`Session.StopAsync`), and the exit is reported when `Session.Exited`
+  completes. Nothing slow runs under the lock: `claude --version` runs outside it.
+- **Clock**: a loop calls `Supervisor.Tick` once a second, or sooner at `NextDueAt`, and every other
+  input wakes it, so a 100 ms backoff (tests) is not rounded up to a second.
+- **Start order**: the pipe is created first (so a host that cannot own the pipe starts nothing),
+  but under the lock, so a client that connects at once waits until the saved list is loaded. A
+  request served before `Load` could save a list without the loaded folders.
+- **Claude not found** (SPEC 6.1): a failed start is retried after `StartErrorRetry` (60 s), and
+  every start locates claude again, so this is the 60 s re-check. The locator gets the PATH of the
+  freshly read environment.
+- **Failing rows** (SPEC 5.2): when a session exits, the host keeps `Session.GetLastLines(20)` and
+  sends them in the row's `last_lines` field while the row is `failing` (SPEC 10 now lists the field).
+- **Logs**: supervisor `FolderLog` effects go to the folder log; host events (start, settings
+  changes, failures) go to host.log. Log write errors never stop the host.
+- **A corrupt `folders.json`** is never overwritten: the host starts with no folders, refuses `add`,
+  `set`, `restart` and `remove` with a message that names the file, and skips every save.
+  A corrupt `settings.json` gives the defaults until the next `settings.set`.
+- **`settings.set`** refuses a `claude_path` that is not a full path.
+
+## 6. Pipe server (`src/ClaudeRc.Host/Ipc/`)
+
+- `PipeServer` creates `\\.\pipe\claude-rc-windows-<SID>[-instance]` with
+  `NamedPipeServerStreamAcl.Create`. The security descriptor has the user as owner, access for the
+  user and SYSTEM only, and no inherited entries. The first instance uses `FirstPipeInstance`, so
+  the host fails rather than join a pipe that someone else created under its name. There is always
+  one waiting instance, so any number of clients are served at once.
+- `ClientConnection` reads UTF-8 lines (at most 1 MiB each) and writes through a bounded queue
+  (20,000 messages). A client that falls that far behind is disconnected rather than slowing the
+  host. A version mismatch gets `{"v":1,"ok":false,"error":"host and app versions differ: restart
+  the host"}` (no `id`), and then the connection is closed. A line that is not a valid request gets
+  an error response, and the connection stays open.
+- `takeover` answers an error until M3 (adoption).
+- **Attach** needs a folder in the list with a running session. The host resizes the session to the
+  viewer, then sends the replay as the first `output` event and streams after it. Output that arrives
+  while the replay is being queued waits behind it, so the order is always right. A viewer stays
+  attached to the folder, not to the process: when the folder's next session starts (after a
+  restart or a crash), the viewer gets a fresh replay of the new session (it starts with `RIS`, so
+  the viewer's screen is reset). `detach`, or closing the connection, ends it. When several
+  viewers have different sizes, the last attach or resize wins.
+- `IpcClient` (`ClaudeRc.Core.Ipc`) is the client side: it matches responses by `id`, puts events
+  in a channel, and connects with `PipeOptions.CurrentUserOnly` (it refuses a pipe that another
+  account owns). The debug CLI and the tests use it, and so will the tray app.
+
+## 7. Test seams
+
+- **Every path and name is injectable** (PLAN 2.2). `HostConfig` holds the parsed `HostOptions`
+  (`--data-dir`, `--log-dir`, `--claude-json`, `--instance`). It also holds the user profile, which
+  is where the locator looks for the native install, and the environment provider. Tests point
+  `claude_path` at FakeClaude.exe through the temp `settings.json`, so no special switch is needed.
+  In-process test hosts also get a temp user profile and a PATH cut down to the Windows folders,
+  so nothing can find the real claude even if the setting were lost. Out-of-process tests check
+  `settings.get` before they turn anything ON.
+- **Time**: `HostConfig.WithTimeScale(f)` multiplies every supervision timing (backoff, failing
+  window, stable uptime, missing-folder re-checks, the starting timeout, the start stagger and the
+  start-error retry) and the prompt-scan interval by `f`. The integration tests run the host
+  in-process (`TestHost`) with `f = 0.02`: the backoff becomes 100, 200, 400 ms…, the start retry
+  1.2 s and the failing window 12 s. They drive it through the real pipe, with real FakeClaude
+  sessions. The stop grace (5 s) is not scaled, because it waits for a real process.
+  `HostConfig.Time` (a `TimeProvider`) is also injectable, but real processes need real time, so
+  the tests scale the timings instead of using a fake clock. The supervisor's own unit tests use a
+  fake clock.
+- `HostProcessTests` run the real ClaudeRcHost.exe for the mutex, the exit codes and "sessions die
+  with the host".
+
+## 8. Debug CLI (`tools/ClaudeRc.DebugCli`)
+
+`ClaudeRc.DebugCli [--instance S] list | add P | set P on|off | restart P | remove P | takeover P |
+attach P [cols rows] | input P TEXT | log P [N] | settings | watch`. `input` understands `\r \n \t
+\e \\ \xHH`. `attach` prints the replay and the stream as raw bytes and sends keys (Ctrl+] detaches;
+with redirected input, its end detaches). Exit codes: 0 ok, 1 the host refused, 2 usage, 3 no host.
+It is an internal tool and is never shipped (SPEC 15).

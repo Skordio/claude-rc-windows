@@ -11,13 +11,14 @@
 //   print           text written to stdout after the replay
 //   prompt          text written to stdout after that; input lines are then read (see input_file)
 //   input_file      file: every input line that arrives is appended to it (reading starts
-//                   when prompt or input_file is set)
+//                   when prompt or input_file is set; keys are read one by one and echoed)
 //   size_file       file: the console size, appended as "<cols>x<rows>" at start and on every change
 //   ctrl_c_file     file: "ctrl-c" is appended each time Ctrl+C arrives
 //   ignore_ctrl_c   true: Ctrl+C is ignored (to test the 5 s kill); otherwise Ctrl+C exits with 0
 //   exit_after_ms   exit on its own after this long, with exit_code (default 0), after writing exit_text
 //
 // "--fake-child" on the command line is the child mode used by spawn_child.
+// "--version" alone prints "0.0.0-fake (Claude Code)" and exits, like claude --version.
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -27,6 +28,9 @@ namespace FakeClaude;
 
 internal static partial class Program
 {
+    // What "claude --version" prints, in claude's format.
+    private const string VersionText = "0.0.0-fake (Claude Code)";
+
     private static readonly ManualResetEventSlim Stop = new();
     private static readonly object FileLock = new();
 
@@ -34,6 +38,11 @@ internal static partial class Program
     {
         if (args is ["--fake-child"])
             return Child();
+        if (args is ["--version"])
+        {
+            Console.Out.Write(VersionText + "\n");
+            return 0;
+        }
 
         var config = Config.Load(Path.Combine(Environment.CurrentDirectory, "fakeclaude.json"));
         Console.OutputEncoding = new UTF8Encoding(false);
@@ -126,22 +135,39 @@ internal static partial class Program
         File.Move(temp, path, overwrite: true);
     }
 
+    // Key by key, echoing what is typed, like claude's own raw-mode input. conhost's cooked line
+    // input (ReadLine) now and then drops a line written right after the previous one was read.
+    // Ctrl+C stays a signal (processed input is left on).
     private static void ReadInput(string? file)
     {
-        var input = Console.In;
+        var stdout = Console.OpenStandardOutput();
+        var line = new StringBuilder();
         while (!Stop.IsSet)
         {
-            string? line;
-            try { line = input.ReadLine(); }
-            catch (IOException) { line = null; }
-            if (line is null)
+            ConsoleKeyInfo key;
+            try { key = Console.ReadKey(intercept: true); }
+            catch (InvalidOperationException) { Thread.Sleep(50); continue; }
+            if (key.Key == ConsoleKey.Enter || key.KeyChar == '\r')
             {
-                // Ctrl+C aborts a pending console read; keep reading.
-                Thread.Sleep(50);
-                continue;
+                Echo(stdout, "\r\n");
+                if (file is not null)
+                    Append(file, line + "\n");
+                line.Clear();
             }
-            if (file is not null)
-                Append(file, line + "\n");
+            else if (key.KeyChar != '\0')
+            {
+                line.Append(key.KeyChar);
+                Echo(stdout, key.KeyChar.ToString());
+            }
+        }
+    }
+
+    private static void Echo(Stream stdout, string text)
+    {
+        lock (FileLock)
+        {
+            stdout.Write(Encoding.UTF8.GetBytes(text));
+            stdout.Flush();
         }
     }
 

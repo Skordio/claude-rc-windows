@@ -1,6 +1,6 @@
 # claude-rc-windows: specification
 
-Status: v1 spec, agreed 2026-11-06. Nothing is implemented yet.
+Status: v1 spec, agreed 2026-11-06. Implementation in progress (see docs/PLAN.md).
 
 claude-rc-windows is a Windows tray app that keeps Claude Code's Remote
 Control server (`claude rc`) running in folders you choose. It brings them
@@ -330,9 +330,11 @@ any status change), `output` (`path`, base64 bytes in `data`, while attached),
 `toast` (`path`, `status`, `text`).
 
 Row: `{path, name, on, saved, status, prompt?, exit_code?, restart_in_s?,
-crashes_10m, started_at?, pid?, error?}`. Optional fields are left out when
+crashes_10m, started_at?, pid?, error?, last_lines?}`. Optional fields are left out when
 empty. `error` holds why the folder cannot be started (6.1, 6.2); the spec
-asks for that error "on the row", so the row needs a field for it.
+asks for that error "on the row", so the row needs a field for it. For the
+same reason `last_lines` holds the last 20 console lines of the session that
+exited last, sent only while the row is `failing` (5.2).
 
 Payloads: `list` replies with `rows`; `log` with `lines`; `settings.get` with
 `settings` (`{claude_path, notifications}`, `claude_path` always present, null

@@ -17,6 +17,8 @@
     <ProjectReference Include="..\..\src\ClaudeRc.Host\ClaudeRc.Host.csproj" />
     <!-- Built first and copied next to the tests (FakeClaude.exe and its runtime files). -->
     <ProjectReference Include="..\FakeClaude\FakeClaude.csproj" />
+    <!-- Run as a process by DebugCliTests. -->
+    <ProjectReference Include="..\..\tools\ClaudeRc.DebugCli\ClaudeRc.DebugCli.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
