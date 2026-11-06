@@ -11,8 +11,10 @@ says how it is built and why.
   notice must list it). Its translated resources are left out of the build
   (`SatelliteResourceLanguages=en`).
 - **The definition is our own XML** (Task Scheduler schema 1.2, `HostTaskDefinition.BuildXml`),
-  registered with `TaskFolder.RegisterTask(name, xml, CreateOrUpdate, account, password,
-  logonType)`. The library is used only to register, read, run, stop and delete. Reason: the
+  registered with `ITaskFolder::RegisterTask(name, xml, TASK_CREATE_OR_UPDATE, account, password,
+  logonType)` through our own small COM declaration (`TaskSchedulerCom`, M4 review): the library's
+  `TaskFolder.RegisterTask` takes the password as a .NET string, which can't be wiped (section 5).
+  The library is used to create folders, read, run, stop and delete. Reason: the
   library's `TaskDefinition` needs a live Task Scheduler connection even to be built, while the XML
   is pure, so the unit tests assert on it directly (`HostTaskDefinitionTests`), and the same string
   is what gets registered. Raw COM through our own interop was the other choice; the library's
@@ -23,6 +25,12 @@ says how it is built and why.
   use `FakeTaskService` (in memory, every call recorded, errors injected).
 - `RegisterTask` with `TASK_LOGON_PASSWORD` is the call the task text calls
   `RegisterTaskDefinition`: same COM method family, same password parameter, but it takes the XML.
+- `TaskSchedulerCom` declares `ITaskService` and `ITaskFolder` as dual interfaces in vtable order
+  (only `Connect`, `GetFolder` and `RegisterTask` are called) and passes the VARIANTs as a
+  blittable struct (16 bytes on x86, 24 on x64). Every registration goes through it, so the
+  integration tests exercise it (the account VARIANT is read back as the principal; E_ACCESSDENIED
+  still arrives as `UnauthorizedAccessException`). The password VARIANT has the same shape and is
+  only filled for startup, which is not registered on this machine.
 
 ## 2. The task definition
 
@@ -79,13 +87,36 @@ thread pool. `HostTaskInfo` now carries `Enabled`, `Running`, `LastResult`, `Las
   `--restart-host`, `--instance`, `--host-exe` and every host argument as `--host-arg`. All
   explicit, because for a standard user UAC runs the helper as an administrator account, whose own
   `%APPDATA%` and identity must not leak into the task. The task is set up for `--for-user`.
+  `HelperArguments` returns null when the helper would refuse this tray's task (section 5): a host
+  that is not next to ClaudeRc.exe (a debug build's `--host-exe`) or other host arguments. The
+  switch then fails with that reason instead of showing UAC for a helper that would refuse.
 - **Exit codes** (`HelperExitCodes`): 0 ok, 1 failed (the helper showed why), 2 bad arguments, 4
   set but not restarted (shown), 1223 cancelled.
 
 ## 5. The elevated helper (`StartModeHelper`, `ClaudeRc.exe --set-start-mode …`)
 
 `App.OnStartup` runs it before the single-instance check (the tray is running), with no tray
-icon or window of its own, `ShutdownMode.OnExplicitShutdown`, and exits with its code. For
+icon or window of its own, `ShutdownMode.OnExplicitShutdown`, and exits with its code.
+
+**Its command line is not trusted** (M4 review). Any process running as the user can start
+`ClaudeRc.exe --set-start-mode …` with `runas`, and the UAC prompt shows claude-rc's own exe, which
+the user expects to approve when switching modes. So in helper mode:
+
+- the host is always `Path.Combine(AppContext.BaseDirectory, "ClaudeRcHost.exe")`; a `--host-exe`
+  naming anything else (compared as full paths, ignoring case) is refused;
+- `--host-arg` is allowed only with `--instance`, and only `--instance <the same suffix>` (required)
+  and `--data-dir`, `--log-dir`, `--claude-json`, each at most once with a full path
+  (`TrayOptions.HelperHostArgumentsError`);
+- `--for-user` must be a user account: `LookupAccountName` with `SID_NAME_USE == SidTypeUser`
+  (`WindowsAccounts.IsUser`; groups, SYSTEM, LOCAL SERVICE, computers and unknown names are not).
+  `NTAccount.Translate` was the suggested call, but it can't tell a user from a group.
+
+The first two are argument errors (the usage message, exit code 2); the account is checked by
+`StartModeHelper` before anything else (an error dialog, exit code 2). Nothing is registered or
+prompted for in either case. Not done: checking that `--for-user` is the user of the helper's own
+logon session (WTS). It would also stop "another user" in logon mode, but the elevated paths can't
+be tried on this machine, and with the program and arguments fixed, the most such a run can do is
+start the real host at another user's logon. For
 startup it loops: prompt → register with the password → on `0x8007052E` prompt again with "The
 password was not accepted…" → Cancel returns 1223 and changes nothing. Any other error is shown
 (Task Scheduler's message only) and returns 1. Logon needs no prompt. It works unelevated too for
@@ -98,10 +129,11 @@ PIN or Windows Hello, which can't be unpacked to a password) and the account pre
 (`CredPackAuthenticationBuffer`). Only the password is used; the task is always set up for the
 account the tray named, and Task Scheduler checks the password against it. It is unpacked into
 a `char[]`; both CredUI buffers are zeroed before `CoTaskMemFree`. `PromptedPassword` wipes its
-array on dispose (after each attempt). The one `string` (COM takes a BSTR) is made right at the
-`RegisterTask` call and never stored, logged, shown or sent over the pipe; a .NET string can't be
-wiped, which is the one exposure left (it lives in the elevated helper only, which exits right
-after). The "save" box is not offered.
+array on dispose (after each attempt). It never becomes a .NET string (M4 review; the first
+version made one per attempt for the library): `TaskSchedulerCom` copies the characters
+straight into a BSTR (`SysAllocStringLen` over the pinned array), passes it as the password
+VARIANT and frees it with `Marshal.ZeroFreeBSTR` right after the call, wrong password or not. It is
+never stored, logged, shown or sent over the pipe. The "save" box is not offered.
 
 None of the elevated or credential code ran during M4 (no UAC or prompts on the user's machine
 while they work); it is unit-tested through `IElevation`, `ICredentialPrompt` and `ITaskService`
@@ -154,7 +186,13 @@ real host's state: `--instance X --data-dir %APPDATA%\claude-rc-windows-X --log-
 %LOCALAPPDATA%\claude-rc-windows-X\logs --claude-json %LOCALAPPDATA%\claude-rc-windows-X\claude.json`.
 `--host-arg` (repeatable) replaces that list; `--host-exe` points at a host that is not next to
 ClaudeRc.exe (a debug build: the tray's and the host's bin folders differ). The task path stays
-`\claude-rc-windows-X\Host` (M2).
+`\claude-rc-windows-X\Host` (M2). The elevated helper accepts neither another host nor other
+arguments (section 5), so a debug tray can switch to logon itself but not to startup; startup is
+tried from a folder where both exes sit together (the portable zip or the installed app).
+
+`HostTaskSpec.TriggerEndBoundary` (and `StartModeSetup.TriggerEndBoundary`) is for tests only: it
+writes the trigger's `EndBoundary` (UTC, before `Enabled` in the schema's order). Null in
+production.
 
 ## 10. Tests
 
@@ -180,10 +218,21 @@ ClaudeRc.exe (a debug build: the tray's and the host's bin folders differ). The 
   registers an enabled task running a **test** ClaudeRcHost (`--instance m4task<guid>` and temp
   folders) and runs it, the host answers `list` on its pipe, an update leaves it running, a
   restart replaces it with one new host that is still running 3 s later, Stop ends it. That last
-  test is skipped on GitHub Actions, whose runner may have no interactive session.
+  test is skipped on GitHub Actions, whose runner may have no interactive session. Its task is
+  enabled (it is run), so its logon trigger expires 10 minutes ahead (`EndBoundary`, read back
+  through the library): if a killed test run leaves it behind, it never starts a test host at a
+  later logon, and Run still works on demand.
+- M4 review: `TrayOptionsStartModeTests` gained the helper refusals (a foreign `--host-exe`,
+  foreign or malformed `--host-arg`s, no helper arguments for a tray the helper would refuse),
+  `StartModeHelperTests` an account that is not a user, `StartModeSwitcherTests` a refused task
+  not handed to the helper, `WindowsAccountsTests` (the current user is a user; groups, service
+  accounts and unknown names are not), `PasswordHandlingTests` (no string API on
+  `PromptedPassword`; the BSTR holds exactly its characters), and `HostTaskDefinitionTests` the
+  trigger end. The fake Task Scheduler checks that the password is still intact when handed over.
 - **Safety**: only `\claude-rc-windows-test-<guid>` folders are created; every path is checked by
   `TestTaskFolders.Guard`; each test deletes its folder in `Dispose`/`finally`; a collection fixture
-  sweeps leftover `\claude-rc-windows-test-*` folders when the suite starts; the end-to-end test
+  sweeps leftover `\claude-rc-windows-test-*` folders when the suite starts and again when the
+  collection ends; the end-to-end test
   kills any ClaudeRcHost started from its own bin folder during the test. `schtasks /query` after
   the runs showed no test task left.
 - Seen failing first: every new unit test ran against a stub (`NotImplementedException`) and

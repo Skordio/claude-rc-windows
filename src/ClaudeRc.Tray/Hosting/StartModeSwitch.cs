@@ -118,7 +118,7 @@ internal sealed record StartModeSetup(string TaskPath, string HostExe, IReadOnly
 /// <param name="tasks">Task Scheduler.</param>
 /// <param name="elevation">Runs the helper elevated.</param>
 /// <param name="setup">The task, host and user.</param>
-/// <param name="helperArguments">The helper's arguments for a mode and restart (<see cref="TrayOptions.HelperArguments"/>).</param>
+/// <param name="helperArguments">The helper's arguments for a mode and restart (<see cref="TrayOptions.HelperArguments"/>); null when the helper would refuse this task.</param>
 /// <param name="fileExists">Whether a file exists.</param>
 /// <param name="delay">Waits (tests pass a no-op).</param>
 internal sealed class StartModeSwitcher(ITaskService tasks, IElevation elevation, StartModeSetup setup,
