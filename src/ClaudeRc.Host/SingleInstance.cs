@@ -5,7 +5,7 @@ namespace ClaudeRc.Host;
 
 /// <summary>
 /// The single-host mutex (SPEC 9.4): <c>Global\claude-rc-windows-host-&lt;SID&gt;[-instance]</c>,
-/// open only to the user and SYSTEM. Hold it for the host's whole life, on the thread that took it.
+/// owned by the user and open only to the user and SYSTEM. Hold it for the host's whole life, on the thread that took it.
 /// </summary>
 internal sealed class SingleInstance : IDisposable
 {
@@ -17,6 +17,8 @@ internal sealed class SingleInstance : IDisposable
     public static SingleInstance? TryAcquire(string name, SecurityIdentifier user)
     {
         var security = new MutexSecurity();
+        // Explicit, like the pipe's: an elevated host's default owner would be BUILTIN\Administrators.
+        security.SetOwner(user);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new MutexAccessRule(user, MutexRights.FullControl, AccessControlType.Allow));
         security.AddAccessRule(new MutexAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Pipes;
+using System.Security.Principal;
 using System.Text;
 using System.Threading.Channels;
 
@@ -44,24 +45,40 @@ public sealed class IpcClient : IAsyncDisposable
 
     /// <summary>
     /// Connects to the host's pipe, retrying until <paramref name="timeout"/> while it does not exist
-    /// yet or all its instances are busy.
+    /// yet or all its instances are busy. The pipe must be owned by the current user's SID.
     /// </summary>
     /// <param name="pipeName">The pipe name without <c>\\.\pipe\</c> (<c>HostOptions.PipeName</c>).</param>
     /// <param name="timeout">How long to keep trying.</param>
     /// <param name="cancellationToken">Cancels the attempt.</param>
     /// <exception cref="TimeoutException">No host answered in time.</exception>
-    public static async Task<IpcClient> ConnectAsync(string pipeName, TimeSpan timeout, CancellationToken cancellationToken = default)
+    /// <exception cref="UnauthorizedAccessException">The pipe is not owned by the current user.</exception>
+    public static Task<IpcClient> ConnectAsync(string pipeName, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        var user = identity.User ?? throw new InvalidOperationException("the current user has no SID");
+        return ConnectAsync(pipeName, timeout, user, cancellationToken);
+    }
+
+    /// <summary>
+    /// <see cref="ConnectAsync(string, TimeSpan, CancellationToken)"/> with the owner the pipe must have.
+    /// Not <c>PipeOptions.CurrentUserOnly</c>: that compares the pipe's owner with the token's
+    /// default owner, which in an elevated process is BUILTIN\Administrators, so an elevated client
+    /// refused the host's pipe (whose owner is always the user's SID, SPEC 12).
+    /// </summary>
+    internal static async Task<IpcClient> ConnectAsync(string pipeName, TimeSpan timeout, SecurityIdentifier user,
+        CancellationToken cancellationToken = default)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (true)
         {
-            // CurrentUserOnly: refuse a pipe of the same name that another account created.
-            var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
             try
             {
                 var left = deadline - DateTime.UtcNow;
                 await pipe.ConnectAsync((int)Math.Clamp(left.TotalMilliseconds, 1, 1000), cancellationToken).ConfigureAwait(false);
+                // Refuse a pipe of the same name that another account created. Only the user (or an
+                // account with the restore privilege, i.e. an administrator) can make the user its owner.
+                EnsureOwnedBy(pipe.GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier, user);
                 return new IpcClient(pipe);
             }
             catch (Exception e) when (e is TimeoutException or IOException)
@@ -78,6 +95,15 @@ public sealed class IpcClient : IAsyncDisposable
                 throw;
             }
         }
+    }
+
+    /// <summary>Throws unless the pipe's <paramref name="owner"/> is <paramref name="user"/>.</summary>
+    /// <exception cref="UnauthorizedAccessException">Another owner, or none.</exception>
+    internal static void EnsureOwnedBy(SecurityIdentifier? owner, SecurityIdentifier user)
+    {
+        if (owner != user)
+            throw new UnauthorizedAccessException(
+                $"the pipe is owned by {owner?.Value ?? "nobody"}, not by the current user {user.Value}");
     }
 
     /// <summary>Sends a request (its <c>Id</c> is replaced by a fresh one) and waits for the host's answer.</summary>

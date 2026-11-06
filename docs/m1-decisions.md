@@ -214,8 +214,13 @@ at, or kill, any other process.
   the viewer's screen is reset). `detach`, or closing the connection, ends it. When several
   viewers have different sizes, the last attach or resize wins.
 - `IpcClient` (`ClaudeRc.Core.Ipc`) is the client side: it matches responses by `id`, puts events
-  in a channel, and connects with `PipeOptions.CurrentUserOnly` (it refuses a pipe that another
-  account owns). The debug CLI and the tests use it, and so will the tray app.
+  in a channel, and refuses a pipe whose owner is not the user's SID (one that another account
+  created under the name). It checks the owner itself rather than using
+  `PipeOptions.CurrentUserOnly`, which compares the owner with the token's default owner: in an
+  elevated process that is BUILTIN\Administrators, so an elevated client (the CI runner, or a user
+  running the tray app as administrator) refused the host's pipe. The host sets the owner of the
+  pipe and of its mutex to the user's SID explicitly, elevated or not. The debug CLI and the tests
+  use it, and so will the tray app.
 
 ## 7. Test seams
 

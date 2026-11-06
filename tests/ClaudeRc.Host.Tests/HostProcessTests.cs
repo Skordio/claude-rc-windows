@@ -138,6 +138,38 @@ public sealed class HostProcessTests
         Assert.All(aces, a => Assert.Equal(AceFlags.None, a.AceFlags));
     }
 
+    [Fact]
+    public async Task The_host_mutex_is_owned_by_the_user_and_open_only_to_the_user_and_system()
+    {
+        // An elevated host's default owner would be BUILTIN\Administrators; the owner is set explicitly.
+        // TestHost only provides the temp folders here; the mutex belongs to the real process.
+        await using var dirs = await TestHost.StartAsync();
+        await dirs.StopHostAsync();
+        using var host = StartHost(dirs.HostArguments);
+        RawSecurityDescriptor descriptor;
+        try
+        {
+            await using (await IpcClient.ConnectAsync(dirs.Options.PipeName, TimeSpan.FromSeconds(20)))
+            {
+            }
+            using var mutex = MutexAcl.OpenExisting(dirs.Options.MutexName, MutexRights.ReadPermissions | MutexRights.Synchronize);
+            descriptor = new RawSecurityDescriptor(mutex.GetAccessControl().GetSecurityDescriptorBinaryForm(), 0);
+        }
+        finally
+        {
+            Kill(host);
+        }
+
+        var user = WindowsIdentity.GetCurrent().User!;
+        Assert.Equal(user, descriptor.Owner);
+        Assert.True(descriptor.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected), "DACL not protected");
+        var aces = descriptor.DiscretionaryAcl!.Cast<CommonAce>().ToList();
+        Assert.All(aces, a => Assert.Equal(AceQualifier.AccessAllowed, a.AceQualifier));
+        Assert.Equal(
+            new[] { new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), user }.OrderBy(s => s.Value),
+            aces.Select(a => a.SecurityIdentifier).OrderBy(s => s.Value));
+    }
+
     [ServerServiceFact]
     public async Task A_client_over_the_network_path_is_refused()
     {
