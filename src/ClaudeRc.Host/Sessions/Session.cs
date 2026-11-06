@@ -30,6 +30,9 @@ public sealed record SessionStartInfo
 
     /// <summary>Lines of scrollback the emulator keeps (SPEC 3.3: 5,000).</summary>
     public int Scrollback { get; init; } = TerminalEmulator.DefaultScrollback;
+
+    /// <summary>Tests only: wraps the pseudo-console's input pipe (e.g. to simulate a console that stops reading).</summary>
+    internal Func<Stream, Stream>? WrapInput { get; init; }
 }
 
 /// <summary>A session could not be started; the message is meant for the row's error field.</summary>
@@ -129,7 +132,7 @@ public sealed class Session : IDisposable, IScreenSource
         var commandLine = CommandLine.Build(info.Program, info.Arguments);
         var environment = SessionEnvironment.ToBlock(info.Environment);
         var pty = ConPtyProcess.Start(info.Program, commandLine, info.WorkingDirectory, environment,
-            (short)info.Columns, (short)info.Rows);
+            (short)info.Columns, (short)info.Rows, info.WrapInput);
         return new Session(pty, info);
     }
 
@@ -234,8 +237,11 @@ public sealed class Session : IDisposable, IScreenSource
     {
         if (!HasExited)
         {
+            // The grace period runs from now whatever happens to the Ctrl+C: it is only queued
+            // (InputWriter), and a console that stops reading input must not keep step 3 from running.
+            var graceOver = Task.Delay(grace);
             WriteInput([0x03]);
-            var first = await Task.WhenAny(_exited.Task, Task.Delay(grace)).ConfigureAwait(false);
+            var first = await Task.WhenAny(_exited.Task, graceOver).ConfigureAwait(false);
             if (first != _exited.Task && !HasExited)
             {
                 _killed = true;

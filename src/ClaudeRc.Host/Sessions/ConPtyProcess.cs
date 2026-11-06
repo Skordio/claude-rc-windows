@@ -14,7 +14,9 @@ namespace ClaudeRc.Host.Sessions;
 /// a Job Object with <c>KILL_ON_JOB_CLOSE</c>, and the process started suspended in that
 /// pseudo-console, assigned to the job, then resumed. Owns every handle; thread-safe for
 /// <see cref="WriteInput"/>, <see cref="Resize"/>, <see cref="TerminateJob"/> and
-/// <see cref="ClosePseudoConsole"/>.
+/// <see cref="ClosePseudoConsole"/>. Input goes through an <see cref="InputWriter"/>, so no call
+/// here ever waits on the console reading its input, and <see cref="TerminateJob"/> takes no lock
+/// that anything slow holds.
 /// </summary>
 internal sealed unsafe class ConPtyProcess : IDisposable
 {
@@ -24,11 +26,11 @@ internal sealed unsafe class ConPtyProcess : IDisposable
     private readonly object _lock = new();
     private readonly SafeFileHandle _job;
     private readonly HANDLE _process;
-    private readonly FileStream _input;
+    private readonly InputWriter _input;
     private HPCON _pseudoConsole;
     private bool _disposed;
 
-    private ConPtyProcess(SafeFileHandle job, HANDLE process, int processId, HPCON pseudoConsole, FileStream input, FileStream output)
+    private ConPtyProcess(SafeFileHandle job, HANDLE process, int processId, HPCON pseudoConsole, InputWriter input, FileStream output)
     {
         _job = job;
         _process = process;
@@ -47,7 +49,7 @@ internal sealed unsafe class ConPtyProcess : IDisposable
     /// <summary>Starts <paramref name="commandLine"/> in a new pseudo-console and job.</summary>
     /// <exception cref="SessionStartException">Any step failed; everything created so far is released.</exception>
     public static ConPtyProcess Start(string applicationName, string commandLine, string workingDirectory,
-        string environmentBlock, short columns, short rows)
+        string environmentBlock, short columns, short rows, Func<Stream, Stream>? wrapInput = null)
     {
         HANDLE inRead = default, inWrite = default, outRead = default, outWrite = default;
         HPCON pc = default;
@@ -122,8 +124,11 @@ internal sealed unsafe class ConPtyProcess : IDisposable
             PInvoke.ResumeThread(pi.hThread);
             Close(ref pi.hThread);
 
-            var input = new FileStream(new SafeFileHandle((nint)inWrite.Value, ownsHandle: true), FileAccess.Write, 1);
+            Stream inputStream = new FileStream(new SafeFileHandle((nint)inWrite.Value, ownsHandle: true), FileAccess.Write, 1);
             inWrite = default;
+            if (wrapInput is not null)
+                inputStream = wrapInput(inputStream);
+            var input = new InputWriter(inputStream, $"session {pi.dwProcessId}");
             var output = new FileStream(new SafeFileHandle((nint)outRead.Value, ownsHandle: true), FileAccess.Read, 1);
             outRead = default;
             var started = new ConPtyProcess(job, pi.hProcess, (int)pi.dwProcessId, pc, input, output);
@@ -174,25 +179,11 @@ internal sealed unsafe class ConPtyProcess : IDisposable
         return unchecked((int)code);
     }
 
-    /// <summary>Writes to the pseudo-console's input; false when it is gone.</summary>
-    public bool WriteInput(ReadOnlySpan<byte> bytes)
-    {
-        lock (_lock)
-        {
-            if (_disposed)
-                return false;
-            try
-            {
-                _input.Write(bytes);
-                _input.Flush();
-                return true;
-            }
-            catch (IOException)
-            {
-                return false;
-            }
-        }
-    }
+    /// <summary>
+    /// Queues bytes for the pseudo-console's input and returns at once; false when it is gone or
+    /// not reading (its queue is full).
+    /// </summary>
+    public bool WriteInput(ReadOnlySpan<byte> bytes) => _input.TryWrite(bytes);
 
     /// <summary>Resizes the pseudo-console; ignored once it is closed.</summary>
     public void Resize(short columns, short rows)
@@ -207,10 +198,21 @@ internal sealed unsafe class ConPtyProcess : IDisposable
     /// <summary>Kills every process in the job; the main process exits with <paramref name="exitCode"/>.</summary>
     public void TerminateJob(int exitCode)
     {
-        lock (_lock)
+        // TerminateJobObject is thread-safe; the reference keeps the handle open against Dispose.
+        var added = false;
+        try
         {
-            if (!_disposed)
-                PInvoke.TerminateJobObject((HANDLE)_job.DangerousGetHandle(), unchecked((uint)exitCode));
+            _job.DangerousAddRef(ref added);
+            PInvoke.TerminateJobObject((HANDLE)_job.DangerousGetHandle(), unchecked((uint)exitCode));
+        }
+        catch (ObjectDisposedException)
+        {
+            // Disposed: the job is closed, and KILL_ON_JOB_CLOSE has killed everything in it.
+        }
+        finally
+        {
+            if (added)
+                _job.DangerousRelease();
         }
     }
 
@@ -222,11 +224,22 @@ internal sealed unsafe class ConPtyProcess : IDisposable
         var memory = stackalloc byte[size];
         var list = (JOBOBJECT_BASIC_PROCESS_ID_LIST*)memory;
         list->NumberOfAssignedProcesses = Max;
-        lock (_lock)
+        var added = false;
+        try
         {
-            if (_disposed || !PInvoke.QueryInformationJobObject((HANDLE)_job.DangerousGetHandle(),
+            _job.DangerousAddRef(ref added);
+            if (!PInvoke.QueryInformationJobObject((HANDLE)_job.DangerousGetHandle(),
                     JOBOBJECTINFOCLASS.JobObjectBasicProcessIdList, list, (uint)size, null))
                 return [];
+        }
+        catch (ObjectDisposedException)
+        {
+            return [];
+        }
+        finally
+        {
+            if (added)
+                _job.DangerousRelease();
         }
         var ids = (nuint*)&list->ProcessIdList;
         var result = new int[list->NumberOfProcessIdsInList];

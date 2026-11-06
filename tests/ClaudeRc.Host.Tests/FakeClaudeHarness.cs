@@ -46,7 +46,8 @@ public sealed class FakeClaudeHarness : IDisposable
         return env;
     }
 
-    public Session Start(IReadOnlyList<string>? args = null, int columns = 120, int rows = 40)
+    /// <param name="wrapInput">Wraps the pseudo-console's input pipe (to simulate a console that stops reading).</param>
+    public Session Start(IReadOnlyList<string>? args = null, int columns = 120, int rows = 40, Func<Stream, Stream>? wrapInput = null)
     {
         var session = Session.Start(new SessionStartInfo
         {
@@ -56,6 +57,7 @@ public sealed class FakeClaudeHarness : IDisposable
             Environment = Environment(),
             Columns = columns,
             Rows = rows,
+            WrapInput = wrapInput,
         });
         _sessions.Add(session);
         return session;

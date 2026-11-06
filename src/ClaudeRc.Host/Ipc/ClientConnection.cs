@@ -8,8 +8,9 @@ namespace ClaudeRc.Host.Ipc;
 /// <summary>
 /// One connected pipe client (SPEC 10): reads newline-delimited UTF-8 lines and hands each to the
 /// host, and writes the host's responses and events through a bounded queue, so a slow client
-/// never blocks the host. A client that falls too far behind, or sends a line over
-/// <see cref="MaxLineBytes"/>, is disconnected.
+/// never blocks the host. A client that falls too far behind (more than
+/// <see cref="DefaultMaxQueuedBytes"/> or <see cref="MaxQueuedMessages"/> waiting), or sends a
+/// line over <see cref="MaxLineBytes"/>, is disconnected.
 /// </summary>
 internal sealed class ClientConnection
 {
@@ -19,18 +20,32 @@ internal sealed class ClientConnection
     /// <summary>Messages queued for a client before it counts as stuck and is disconnected.</summary>
     public const int MaxQueuedMessages = 20_000;
 
+    /// <summary>
+    /// Bytes queued for a client before it counts as stuck and is disconnected. An output event is
+    /// up to about 22 KB and a replay a few MB, so this is several replays' worth, but it keeps a
+    /// viewer that stopped reading from costing the host hundreds of MB.
+    /// </summary>
+    public const long DefaultMaxQueuedBytes = 32L << 20;
+
     private static readonly UTF8Encoding Utf8NoBom = new(false);
 
     private readonly NamedPipeServerStream _pipe;
     private readonly Channel<string> _outgoing = Channel.CreateBounded<string>(
         new BoundedChannelOptions(MaxQueuedMessages) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly CancellationTokenSource _abort = new();
+    private readonly long _maxQueuedBytes;
+    private long _queuedBytes;
     private volatile bool _closing;
 
-    public ClientConnection(NamedPipeServerStream pipe, int id)
+    /// <param name="pipe">The connected server end.</param>
+    /// <param name="id">A number for the host log.</param>
+    /// <param name="maxQueuedBytes">Byte cap on the outgoing queue (tests use a small one).</param>
+    public ClientConnection(NamedPipeServerStream pipe, int id, long maxQueuedBytes = DefaultMaxQueuedBytes)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxQueuedBytes, 1);
         _pipe = pipe;
         Id = id;
+        _maxQueuedBytes = maxQueuedBytes;
     }
 
     /// <summary>A number for the host log.</summary>
@@ -48,9 +63,14 @@ internal sealed class ClientConnection
     /// <summary>Queues an encoded message line (without the newline). A full queue disconnects the client.</summary>
     public void SendLine(string line)
     {
+        ArgumentNullException.ThrowIfNull(line);
         if (_closing)
             return;
-        if (!_outgoing.Writer.TryWrite(line))
+        // Lines are JSON, nearly all ASCII (output is base64): chars + newline is close enough.
+        // One message alone (a large replay) is always let through; the cap is on falling behind.
+        var size = line.Length + 1L;
+        var queued = Interlocked.Add(ref _queuedBytes, size);
+        if ((queued > _maxQueuedBytes && queued != size) || !_outgoing.Writer.TryWrite(line))
             Abort();
     }
 
@@ -133,6 +153,7 @@ internal sealed class ClientConnection
             await foreach (var line in _outgoing.Reader.ReadAllAsync(_abort.Token).ConfigureAwait(false))
             {
                 await _pipe.WriteAsync(Utf8NoBom.GetBytes(line + "\n"), _abort.Token).ConfigureAwait(false);
+                Interlocked.Add(ref _queuedBytes, -(line.Length + 1L));
                 if (_outgoing.Reader.Count == 0)
                     await _pipe.FlushAsync(_abort.Token).ConfigureAwait(false);
             }

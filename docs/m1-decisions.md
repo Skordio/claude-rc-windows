@@ -102,9 +102,14 @@ Tests (`tests/ClaudeRc.Host.Tests/TerminalEmulatorTests.cs`):
   4. only then completes `Exited`.
 
   Output written just before exit is therefore on the screen (m0-findings 1).
-- **Stop** (`StopAsync`, SPEC 6.4): write 0x03, wait 5 s, then `TerminateJobObject` with
+- **Stop** (`StopAsync`, SPEC 6.4): queue 0x03, wait 5 s, then `TerminateJobObject` with
   `Session.KilledExitCode` (-1). `StopResult.Killed` says whether step 3 was needed.
   `Dispose` kills at once.
+- **Input never blocks.** Writes to the pseudo-console go through `InputWriter`: a queue (at most
+  4 MiB; more is refused) and a writer thread per session, which owns the pipe. A console that
+  stops draining its input would otherwise block the caller, and callers hold the host's lock
+  (`input`, the stop's Ctrl+C). The grace timer of a stop starts before the 0x03 is queued, and
+  `TerminateJob` takes a handle reference instead of a lock, so step 3 always runs.
 - **Size limits**: 1–1000 columns and 1–500 rows. They bound the emulator's memory when a
   viewer asks for a size.
 - **Attach**: `Attach(callback, out replay)` takes the replay bytes and adds the subscriber under
@@ -177,18 +182,27 @@ at, or kill, any other process.
 - **A corrupt `folders.json`** is never overwritten: the host starts with no folders, refuses `add`,
   `set`, `restart` and `remove` with a message that names the file, and skips every save.
   A corrupt `settings.json` gives the defaults until the next `settings.set`.
-- **`settings.set`** refuses a `claude_path` that is not a full path.
+- **`settings.set`** refuses a `claude_path` that is not a full path, or not a `.exe` or `.cmd`
+  (SPEC 6.1; `ClaudeLocator` refuses the same when it reads the setting).
 
 ## 6. Pipe server (`src/ClaudeRc.Host/Ipc/`)
 
 - `PipeServer` creates `\\.\pipe\claude-rc-windows-<SID>[-instance]` with
-  `NamedPipeServerStreamAcl.Create`. The security descriptor has the user as owner, access for the
-  user and SYSTEM only, and no inherited entries. The first instance uses `FirstPipeInstance`, so
-  the host fails rather than join a pipe that someone else created under its name. There is always
-  one waiting instance, so any number of clients are served at once.
-- `ClientConnection` reads UTF-8 lines (at most 1 MiB each) and writes through a bounded queue
-  (20,000 messages). A client that falls that far behind is disconnected rather than slowing the
-  host. A version mismatch gets `{"v":1,"ok":false,"error":"host and app versions differ: restart
+  `CreateNamedPipeW` and wraps the handle in a `NamedPipeServerStream`.
+  `NamedPipeServerStreamAcl.Create` cannot set `PIPE_REJECT_REMOTE_CLIENTS`, and without it a
+  client on `\\127.0.0.1\pipe\…` (SMB, the same path a remote machine uses) connected: a
+  loopback SMB client keeps its interactive token, so a DACL alone cannot tell it apart. The
+  security descriptor has the user as owner, a deny for the NETWORK SID (a second layer, which a
+  real remote logon carries), access for the user and SYSTEM only, and no inherited entries. The
+  first instance uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, so the host fails rather than join a pipe
+  that someone else created under its name. There is always one waiting instance, so any number of
+  clients are served at once. `HostProcessTests` reads the live pipe's security back and checks
+  that the `127.0.0.1` path is refused (skipped when the Server service is not running).
+- `ClientConnection` reads UTF-8 lines (at most 1 MiB each) and writes through a queue bounded at
+  20,000 messages and 32 MiB (an output event is about 22 KB, a replay a few MB). A client that
+  falls that far behind is disconnected rather than slowing the host or making it buffer hundreds
+  of MB. A single message larger than the cap is still sent when the queue is otherwise empty.
+  A version mismatch gets `{"v":1,"ok":false,"error":"host and app versions differ: restart
   the host"}` (no `id`), and then the connection is closed. A line that is not a valid request gets
   an error response, and the connection stays open.
 - `takeover` answers an error until M3 (adoption).
