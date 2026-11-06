@@ -8,5 +8,9 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AnalysisLevel>latest</AnalysisLevel>
     <Deterministic>true</Deterministic>
+    <!-- Version resources (Task Manager, Explorer, the toast header's fallback name). The version is set by build/publish.ps1 (-p:Version from the git tag). -->
+    <Product>claude-rc-windows</Product>
+    <Company>claude-rc-windows (unofficial; not affiliated with Anthropic)</Company>
+    <Copyright>Copyright (c) 2026 Steven Wells. MIT License.</Copyright>
   </PropertyGroup>
 </Project>

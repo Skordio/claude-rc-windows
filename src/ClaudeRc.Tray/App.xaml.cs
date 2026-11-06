@@ -26,6 +26,8 @@ internal partial class App
     private Mutex? _mutex;
     private EventWaitHandle? _showEvent;
     private RegisteredWaitHandle? _showWait;
+    private EventWaitHandle? _quitEvent;
+    private RegisteredWaitHandle? _quitWait;
     private TaskbarIcon? _tray;
     private HostConnection? _connection;
     private MainWindow? _main;
@@ -56,6 +58,13 @@ internal partial class App
             return;
         }
 
+        if (options.Setup is { } setup)
+        {
+            // The installer's steps (SPEC 14): no tray, no window of their own; they exit with their result.
+            RunSetup(options, setup, account);
+            return;
+        }
+
         if (options.SetStartMode is { } mode)
         {
             // The elevated helper (SPEC 9.2): no tray, no window of its own; it exits with its result.
@@ -71,8 +80,9 @@ internal partial class App
             return;
         }
 
-        // The event first, so a second launch can always find it once the mutex exists.
+        // The events first, so a second launch (or the installer) can always find them once the mutex exists.
         _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, options.ShowEventName);
+        _quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, options.QuitEventName);
         _mutex = new Mutex(true, options.MutexName, out var first);
         if (!first)
         {
@@ -81,6 +91,8 @@ internal partial class App
             _showEvent.Set();
             _showEvent.Dispose();
             _showEvent = null;
+            _quitEvent.Dispose();
+            _quitEvent = null;
             _mutex.Dispose();
             _mutex = null;
             Shutdown(0);
@@ -116,6 +128,9 @@ internal partial class App
 
         _showWait = ThreadPool.RegisterWaitForSingleObject(_showEvent, (_, _) =>
             Dispatcher.BeginInvoke(ShowMain), null, Timeout.Infinite, executeOnlyOnce: false);
+        // The installer (an upgrade or the uninstall) asks the tray to quit before it replaces or removes the files.
+        _quitWait = ThreadPool.RegisterWaitForSingleObject(_quitEvent, (_, _) =>
+            Dispatcher.BeginInvoke(Quit), null, Timeout.Infinite, executeOnlyOnce: true);
 
         // Toasts (SPEC 3.5). A click arrives on a COM thread, also when it started this process.
         _notifier = new ToolkitToastNotifier(options.Instance);
@@ -149,6 +164,40 @@ internal partial class App
 #pragma warning restore CA1031
         {
             dialogs.ShowError("Start mode", "The start mode could not be changed: " + e.Message);
+        }
+        finally
+        {
+            Shutdown(code);
+        }
+    }
+
+    /// <summary>
+    /// <c>--install</c>, <c>--stop-for-update</c>, <c>--uninstall</c>: the installer's steps
+    /// (<see cref="AppSetup"/>). They show their own errors and exit with a <see cref="SetupExitCodes"/> value.
+    /// </summary>
+    private async void RunSetup(TrayOptions options, SetupAction action, string account)
+    {
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        var dialogs = new WpfDialogs();
+        var code = SetupExitCodes.Failed;
+        try
+        {
+            var tasks = new WindowsTaskService();
+            var setup = new StartModeSetup(options.TaskPath, options.HostExe, options.HostArguments, account);
+            var switcher = new StartModeSwitcher(tasks,
+                new ShellElevation(Environment.ProcessPath ?? throw new InvalidOperationException("no process path")),
+                setup, (m, restart) => options.HelperArguments(m, account, restart), File.Exists, (delay, ct) => Task.Delay(delay, ct));
+            var appSetup = new AppSetup(tasks, switcher, new PipeHostConnector(options.PipeName),
+                new WindowsRunningTray(options.MutexName, options.QuitEventName), new WindowsProcessStopper(),
+                ToolkitToastNotifier.Unregister, dialogs, setup,
+                Path.Combine(Path.GetDirectoryName(options.AppHostExe)!, "ClaudeRc.exe"), (delay, ct) => Task.Delay(delay, ct));
+            code = await appSetup.RunAsync(action);
+        }
+#pragma warning disable CA1031 // The installer's step reports anything that goes wrong and exits.
+        catch (Exception e)
+#pragma warning restore CA1031
+        {
+            dialogs.ShowError(AppSetup.Title, "Setup could not finish: " + e.Message);
         }
         finally
         {
@@ -232,10 +281,12 @@ internal partial class App
     protected override void OnExit(ExitEventArgs e)
     {
         _showWait?.Unregister(null);
+        _quitWait?.Unregister(null);
         _toasts?.Dispose();
         _notifier?.Dispose();
         _tray?.Dispose();
         _showEvent?.Dispose();
+        _quitEvent?.Dispose();
         if (_mutex is not null)
         {
             _mutex.ReleaseMutex();

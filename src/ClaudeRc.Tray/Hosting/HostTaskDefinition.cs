@@ -145,6 +145,41 @@ internal static class HostTaskDefinition
         };
     }
 
+    /// <summary>The ClaudeRcHost.exe a task's XML runs: its only Exec action's command, quotes removed; null when there is not exactly one, or it is not a full path.</summary>
+    public static string? ReadHostExe(string xml) => ReadExec(xml)?.Exe;
+
+    /// <summary>Whether a task's XML runs <paramref name="hostExe"/> (case ignored) with exactly <paramref name="hostArguments"/>.</summary>
+    public static bool RunsHost(string xml, string hostExe, IReadOnlyList<string> hostArguments)
+    {
+        ArgumentNullException.ThrowIfNull(hostArguments);
+        if (ReadExec(xml) is not { } exec || !Path.IsPathFullyQualified(hostExe ?? ""))
+            return false;
+        return string.Equals(Path.GetFullPath(exec.Exe), Path.GetFullPath(hostExe!), StringComparison.OrdinalIgnoreCase)
+            && string.Equals(exec.Arguments, CommandLine.JoinArguments(hostArguments), StringComparison.Ordinal);
+    }
+
+    private static (string Exe, string Arguments)? ReadExec(string xml)
+    {
+        XDocument doc;
+        try
+        {
+            doc = XDocument.Parse(xml ?? "");
+        }
+        catch (XmlException)
+        {
+            return null;
+        }
+        var execs = doc.Root?.Element(Ns + "Actions")?.Elements().ToList() ?? [];
+        if (execs.Count != 1 || execs[0].Name != Ns + "Exec")
+            return null;
+        var command = (execs[0].Element(Ns + "Command")?.Value ?? "").Trim();
+        if (command.Length >= 2 && command[0] == '"' && command[^1] == '"')
+            command = command[1..^1];
+        if (!Path.IsPathFullyQualified(command))
+            return null;
+        return (command, (execs[0].Element(Ns + "Arguments")?.Value ?? "").Trim());
+    }
+
     /// <summary>How the task logs on in a mode.</summary>
     /// <exception cref="ArgumentException">Not logon or startup.</exception>
     public static TaskLogon LogonFor(StartMode mode) => mode switch

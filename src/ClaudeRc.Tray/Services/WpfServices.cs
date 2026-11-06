@@ -57,6 +57,9 @@ internal sealed class WpfDialogs : IDialogs
 
     private static MessageBoxResult Show(string message, string title, MessageBoxButton buttons, MessageBoxImage image)
     {
+        // Only the UI thread may look at the app's windows (a caller may be past a ConfigureAwait(false)).
+        if (Application.Current?.Dispatcher is { } dispatcher && !dispatcher.CheckAccess())
+            return dispatcher.Invoke(() => Show(message, title, buttons, image));
         var caption = $"{title} - {Product}";
         return Owner is { } owner
             ? MessageBox.Show(owner, message, caption, buttons, image)

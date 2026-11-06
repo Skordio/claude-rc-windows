@@ -11,6 +11,7 @@
     <OutputType>WinExe</OutputType>
     <UseWPF>true</UseWPF>
     <AssemblyName>ClaudeRc</AssemblyName>
+    <AssemblyTitle>claude-rc-windows</AssemblyTitle>
     <RootNamespace>ClaudeRc.Tray</RootNamespace>
     <ApplicationIcon>Assets\tray.ico</ApplicationIcon>
     <!-- The app is English only; leaves out the TaskScheduler package's translated resources. -->

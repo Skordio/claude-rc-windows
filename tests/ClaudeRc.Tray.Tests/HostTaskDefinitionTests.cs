@@ -196,6 +196,56 @@ public class HostTaskDefinitionTests
     }
 
     [Fact]
+    public void The_host_reads_back_from_the_xml()
+    {
+        var xml = HostTaskDefinition.BuildXml(Spec(StartMode.Startup));
+        Assert.Equal(Exe, HostTaskDefinition.ReadHostExe(xml));
+        Assert.True(HostTaskDefinition.RunsHost(xml, Exe, []));
+        // Paths are compared as Windows does: case is ignored.
+        Assert.True(HostTaskDefinition.RunsHost(xml, Exe.ToUpperInvariant(), []));
+        Assert.False(HostTaskDefinition.RunsHost(xml, @"D:\portable\ClaudeRcHost.exe", []));
+        Assert.False(HostTaskDefinition.RunsHost(xml, Exe, ["--instance", "t1"]));
+    }
+
+    [Fact]
+    public void A_hosts_arguments_must_match_too()
+    {
+        string[] args = ["--instance", "t1", "--data-dir", @"C:\a b"];
+        var xml = HostTaskDefinition.BuildXml(Spec(StartMode.Logon, args));
+        Assert.True(HostTaskDefinition.RunsHost(xml, Exe, args));
+        Assert.False(HostTaskDefinition.RunsHost(xml, Exe, []));
+        Assert.False(HostTaskDefinition.RunsHost(xml, Exe, ["--instance", "t2", "--data-dir", @"C:\a b"]));
+    }
+
+    [Theory]
+    [InlineData("<Command>\"C:\\x\\ClaudeRcHost.exe\"</Command>", @"C:\x\ClaudeRcHost.exe")]
+    [InlineData("<Command>C:\\x\\ClaudeRcHost.exe</Command>", @"C:\x\ClaudeRcHost.exe")]
+    [InlineData("<Command>  \"C:\\x y\\ClaudeRcHost.exe\"  </Command><Arguments>--instance t</Arguments>", @"C:\x y\ClaudeRcHost.exe")]
+    public void The_host_reads_back_from_task_schedulers_own_xml(string exec, string expected)
+    {
+        var xml = $"""
+            <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <Triggers><LogonTrigger /></Triggers>
+              <Actions Context="Author"><Exec>{exec}</Exec></Actions>
+            </Task>
+            """;
+        Assert.Equal(expected, HostTaskDefinition.ReadHostExe(xml));
+    }
+
+    [Theory]
+    [InlineData("<Task xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><Actions><Exec><Command>a.exe</Command></Exec><Exec><Command>b.exe</Command></Exec></Actions></Task>")]
+    [InlineData("<Task xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><Actions><Exec><Command>  </Command></Exec></Actions></Task>")]
+    [InlineData("<Task xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><Actions><Exec><Command>ClaudeRcHost.exe</Command></Exec></Actions></Task>")]
+    [InlineData("<Task xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\" />")]
+    [InlineData("not xml")]
+    [InlineData("")]
+    public void A_task_without_one_full_host_path_has_no_host(string xml)
+    {
+        Assert.Null(HostTaskDefinition.ReadHostExe(xml));
+        Assert.False(HostTaskDefinition.RunsHost(xml, @"C:\x\ClaudeRcHost.exe", []));
+    }
+
+    [Fact]
     public void Result_codes_are_task_schedulers()
     {
         Assert.Equal(unchecked((int)0x8007052E), HostTaskDefinition.LogonFailure);

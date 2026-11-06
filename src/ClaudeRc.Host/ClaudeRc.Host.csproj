@@ -3,6 +3,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <AssemblyName>ClaudeRcHost</AssemblyName>
+    <AssemblyTitle>claude-rc-windows host</AssemblyTitle>
     <RootNamespace>ClaudeRc.Host</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>

@@ -1,6 +1,7 @@
 # claude-rc-windows: specification
 
-Status: v1 spec, agreed 2026-11-06. Implementation in progress (see docs/PLAN.md).
+Status: v1 spec, agreed 2026-11-06. Implemented (M0-M5, see docs/PLAN.md);
+the manual release checks (17) are still to be done.
 
 claude-rc-windows is a Windows tray app that keeps Claude Code's Remote
 Control server (`claude rc`) running in folders you choose. It brings them
@@ -165,8 +166,8 @@ Action Center. The clicked row is scrolled into view and highlighted for a few
 seconds. A click that starts the tray arrives before the rows are loaded; the
 row is then focused as soon as it appears (within 10 s). The app is unpackaged, so the toast library registers it for toasts
 under `HKCU\Software\Classes` on first start; `ClaudeRc.exe
---unregister-notifications` removes that registration (the uninstaller runs
-it, 14).
+--unregister-notifications` removes that registration (the uninstaller's
+`ClaudeRc.exe --uninstall` does the same, 14).
 
 ## 4. Folder status
 
@@ -558,20 +559,49 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
 
 ## 14. Packaging and releases
 
-- **Installer** (Inno Setup, per-user, no admin): installs to
+- **Installer** (Inno Setup, per-user, no admin; one per architecture, x64 and
+  arm64): installs to
   `%LOCALAPPDATA%\Programs\claude-rc-windows`, Start menu shortcut, creates
   the `logon` task, starts the host and tray app. Uninstall: turns every
-  folder OFF (stops sessions), deletes the task, runs `ClaudeRc.exe
-  --unregister-notifications` (3.5), removes the program and
+  folder OFF (stops sessions), deletes the task, removes the toast
+  registration (3.5), removes the program and
   `%LOCALAPPDATA%\claude-rc-windows\webview2`; asks
-  whether to keep `%APPDATA%\claude-rc-windows`. Never touches `.claude.json`.
+  whether to keep `%APPDATA%\claude-rc-windows` and the logs
+  (`%LOCALAPPDATA%\claude-rc-windows\logs`; a silent uninstall keeps both).
+  Never touches `.claude.json`.
+  The task, the host and the folders are handled by the installed
+  `ClaudeRc.exe` itself, with three installer steps that take no path or
+  account (only `--instance`), so the task is the same one the app builds (9):
+  - `--install`, after the files are copied: the running tray quits; a
+    `startup` task that already runs this copy's host is kept (setting it up
+    again would need UAC and the password), another `startup` task becomes
+    this copy's `startup` task through the elevated helper (9.2), anything else
+    becomes this copy's `logon` task; then the running host is stopped and the
+    task run.
+  - `--stop-for-update`, before an upgrade replaces the files: the running
+    tray quits and the host is stopped (its sessions end with it, 6.5; the
+    ON folders start again when `--install` runs the task).
+  - `--uninstall`: as above. A task that runs another copy's `ClaudeRcHost.exe`
+    (the portable zip) is left alone, with its host and folders.
+
+  Stopping the host = stopping the task's running instance, then ending any
+  process still running this copy's `ClaudeRcHost.exe` (a stop Task Scheduler
+  refused, for an administrator-made `startup` task). The tray quits through a
+  named event (`Local\claude-rc-windows-tray-quit-<user SID>`); a
+  `ClaudeRc.exe` of this copy still running after that is ended. Every problem
+  is shown once at the end, and each step still runs.
 - **Portable zip**: same exes; first run of the tray app offers to create the
   `logon` task: whenever the tray starts and finds no task, it asks once (no
   admin needed). Yes creates it and, if no host answers, runs it; No asks again
   at the tray's next start. The task runs the `ClaudeRcHost.exe` next to
-  `ClaudeRc.exe`.
+  `ClaudeRc.exe`. To remove it, `ClaudeRc.exe --uninstall` in its folder does
+  the uninstaller's steps (the README says so; the other two steps stay
+  internal, 15).
 - Built by GitHub Actions on tags `v*`: test, publish x64 and arm64, build the
-  installers, attach everything to the GitHub Release with SHA-256 sums.
+  installers, attach everything to the GitHub Release with SHA-256 sums. Run
+  by hand (`workflow_dispatch`), it is a dry run unless told otherwise: it
+  builds everything and uploads it as workflow artifacts, and creates no
+  release (that also needs a `v*` tag).
 - Unsigned in v1. The README explains SmartScreen's "Windows protected your
   PC" → **More info** → **Run anyway**. Signing (e.g. Azure Trusted Signing)
   is a later addition.
@@ -580,7 +610,8 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
 
 Update check, per-folder options, auto-update, signing, multiple users per
 host, running folders as another account, a CLI. Each is a separate issue
-when wanted.
+when wanted. (`ClaudeRc.exe` takes a few internal options for the elevated
+helper, 9.2, and the installer, 14; they are not a CLI.)
 
 ## 16. Milestones
 

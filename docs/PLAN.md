@@ -51,10 +51,12 @@ tests/ClaudeRc.Host.Tests/
 tests/FakeClaude/
 tests/fixtures/              real claude rc output captured in M0
 tools/ClaudeRc.DebugCli/
-installer/claude-rc-windows.iss
+installer/claude-rc-windows.iss   Inno Setup script (M5)
+build/publish.ps1                publish, portable zips, installers, SHA256SUMS.txt (M5)
+THIRD-PARTY-NOTICES.md
 .github/workflows/ci.yml     dotnet test on push/PR (added in M1)
 .github/workflows/release.yml  on tags v* (added in M5)
-docs/PLAN.md, docs/m0-findings.md, docs/m1-decisions.md … docs/m3-decisions.md
+docs/PLAN.md, docs/m0-findings.md, docs/m1-decisions.md … docs/m5-decisions.md
 ```
 
 ## 4. Milestones
@@ -106,6 +108,8 @@ The `\claude-rc-windows\Host` task: `logon` (no admin needed) and `startup` (UAC
 ### M5: Release (about 1 h)
 
 Install Inno Setup (`winget install JRSoftware.InnoSetup`; recorded in `~/CHANGES.md`). Per-user installer exactly as SPEC §14 (install, shortcut, `logon` task, start host and tray; uninstall turns every folder OFF, deletes the task, and asks whether to keep the data folder). Portable zip. `release.yml`: on `v*` tags, test, publish x64 and arm64 single-file self-contained, build installers, attach everything with SHA-256 sums. README: install, SmartScreen steps, usage, status updated. Then open a PR `impl/v1` → `main`.
+
+Done: see `docs/m5-decisions.md` (the installer's steps are run by ClaudeRc.exe itself: `--install`, `--stop-for-update`, `--uninstall`). The dry run of `release.yml` on GitHub needs the file on `main` (`workflow_dispatch`).
 
 ## 5. What needs you (manual checks)
 

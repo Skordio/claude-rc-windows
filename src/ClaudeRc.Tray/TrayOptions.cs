@@ -7,7 +7,8 @@ namespace ClaudeRc.Tray;
 /// The tray app's command line (PLAN 2.2):
 /// <c>[--instance &lt;suffix&gt;] [-ToastActivated] [--unregister-notifications] [--host-exe &lt;path&gt;] [--host-arg &lt;arg&gt;]…</c>,
 /// and for the elevated start-mode helper (SPEC 9.2)
-/// <c>--set-start-mode logon|startup --for-user &lt;DOMAIN\name&gt; [--restart-host]</c>. The instance suffix is
+/// <c>--set-start-mode logon|startup --for-user &lt;DOMAIN\name&gt; [--restart-host]</c>, and for the installer
+/// (SPEC 14) <c>--install</c>, <c>--stop-for-update</c> or <c>--uninstall</c>. The instance suffix is
 /// added to the pipe name (so it meets the host started with the same <c>--instance</c>), to the
 /// single-instance names, and to the scheduled task folder, so a test tray never runs the real task.
 /// </summary>
@@ -16,7 +17,9 @@ namespace ClaudeRc.Tray;
 /// of the user can start it with <c>runas</c>, and the UAC prompt shows ClaudeRc.exe): it only ever
 /// sets up the fixed task running the <c>ClaudeRcHost.exe</c> next to it, with no arguments, or for
 /// a test instance only that instance's own <c>--instance</c> and folder options
-/// (<see cref="HelperHostArgumentsError"/>). Anything else is refused.
+/// (<see cref="HelperHostArgumentsError"/>). Anything else is refused. The installer's steps take
+/// no path or account either: they act on the fixed task, the exes in ClaudeRc.exe's own folder
+/// and the current user, and accept only <c>--instance</c> besides.
 /// </remarks>
 internal sealed record TrayOptions
 {
@@ -39,6 +42,12 @@ internal sealed record TrayOptions
 
     /// <summary>A second launch sets this event; the first one then shows its window.</summary>
     public required string ShowEventName { get; init; }
+
+    /// <summary>Set by the installer's steps (<see cref="Setup"/>); the running tray then quits.</summary>
+    public string QuitEventName { get; init; } = "";
+
+    /// <summary><c>--install</c>, <c>--stop-for-update</c> or <c>--uninstall</c>: run that installer step (SPEC 14), then exit.</summary>
+    public SetupAction? Setup { get; init; }
 
     /// <summary>The host's scheduled task (SPEC 9): <c>\claude-rc-windows[-instance]\Host</c>.</summary>
     public required string TaskPath { get; init; }
@@ -162,6 +171,8 @@ internal sealed record TrayOptions
         StartMode? setMode = null;
         List<string>? hostArgs = null;
         bool toastActivated = false, unregister = false, restartHost = false;
+        SetupAction? setup = null;
+        string? other = null;
         for (var i = 0; i < args.Count; i++)
         {
             var arg = args[i];
@@ -172,8 +183,23 @@ internal sealed record TrayOptions
                 return args[++i];
             }
 
+            if (arg is not ("--install" or "--stop-for-update" or "--uninstall" or "--instance")
+                && !arg.StartsWith("--instance=", StringComparison.Ordinal))
+            {
+                other ??= arg;
+            }
             switch (arg)
             {
+                case "--install" or "--stop-for-update" or "--uninstall":
+                    if (setup is not null)
+                        throw new ArgumentException($"only one of --install, --stop-for-update and --uninstall: {arg}");
+                    setup = arg switch
+                    {
+                        "--install" => SetupAction.Install,
+                        "--stop-for-update" => SetupAction.StopForUpdate,
+                        _ => SetupAction.Uninstall,
+                    };
+                    break;
                 case "--instance":
                     instance = Value();
                     break;
@@ -216,6 +242,8 @@ internal sealed record TrayOptions
         }
         if (setMode is not null && forUser is null)
             throw new ArgumentException("--set-start-mode needs --for-user");
+        if (setup is not null && other is not null)
+            throw new ArgumentException($"the installer's steps take only --instance, not {other}");
 
         // The host's own parser checks the suffix and builds the pipe name, so both always agree.
         var host = HostOptions.Parse(instance is null ? [] : ["--instance", instance],
@@ -249,6 +277,7 @@ internal sealed record TrayOptions
             PipeName = host.PipeName,
             MutexName = $@"Local\{Product}-tray-{userSid}{suffix}",
             ShowEventName = $@"Local\{Product}-tray-show-{userSid}{suffix}",
+            QuitEventName = $@"Local\{Product}-tray-quit-{userSid}{suffix}",
             TaskPath = $@"\{Product}{suffix}\Host",
             WebViewDataDir = Path.Combine(local, Product, "webview2" + suffix),
             ToastActivated = toastActivated,
@@ -259,6 +288,7 @@ internal sealed record TrayOptions
             SetStartMode = setMode,
             ForUser = forUser,
             RestartHost = restartHost,
+            Setup = setup,
         };
     }
 }

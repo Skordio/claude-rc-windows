@@ -276,9 +276,13 @@ internal sealed class FakeTaskService : ITaskService
     /// <summary>Fails every call of an operation.</summary>
     public Dictionary<string, Exception> AlwaysFail { get; } = [];
 
+    /// <summary>Called with each call ("stop \claude-rc-windows\Host"), so a test can order it among other fakes' calls.</summary>
+    public Action<string>? Observe { get; set; }
+
     private void Enter(string op, string path)
     {
         Calls.Add($"{op} {path}");
+        Observe?.Invoke($"{op} {path}");
         if (AlwaysFail.TryGetValue(op, out var always))
             throw always;
         if (Errors.TryGetValue(op, out var q) && q.Count > 0)
@@ -392,5 +396,33 @@ internal sealed class FakeSwitcher : IStartModeSwitcher
         Calls.Add((target, restartHost));
         OnSwitch?.Invoke(target);
         return Task.FromResult(Result);
+    }
+}
+
+/// <summary>The running tray app: <see cref="Quit"/> answers <see cref="QuitResult"/>.</summary>
+internal sealed class FakeRunningTray(List<string>? journal = null) : IRunningTray
+{
+    public bool QuitResult { get; set; } = true;
+    public int Quits { get; private set; }
+
+    public bool Quit(TimeSpan timeout)
+    {
+        Quits++;
+        journal?.Add("quit tray");
+        return QuitResult;
+    }
+}
+
+/// <summary>Processes by exe path: <see cref="Left"/> says how many of an exe's processes "survive" a stop.</summary>
+internal sealed class FakeProcessStopper(List<string>? journal = null) : IProcessStopper
+{
+    public Dictionary<string, int> Left { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<(string Exe, TimeSpan Grace)> Stops { get; } = [];
+
+    public int StopAll(string exePath, TimeSpan grace)
+    {
+        Stops.Add((exePath, grace));
+        journal?.Add($"end {exePath}");
+        return Left.GetValueOrDefault(exePath);
     }
 }
