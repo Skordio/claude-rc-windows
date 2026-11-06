@@ -69,6 +69,8 @@ internal sealed class FolderRowViewModel : ObservableObject
         nameof(CanShow), nameof(CanRemove), nameof(CanRestart), nameof(ShowRestartButton), nameof(ShowTakeOver),
         nameof(HasPrompt), nameof(PromptText), nameof(HasError), nameof(ErrorText), nameof(HasLastLines),
         nameof(LastLinesText), nameof(TurnOffConfirmation), nameof(IsUnsaved), nameof(UnsavedText), nameof(ToggleToolTip),
+        nameof(ShowAccessibleName), nameof(ToggleAccessibleName), nameof(MoreAccessibleName),
+        nameof(TakeOverAccessibleName), nameof(RestartAccessibleName),
     ];
 
     private readonly TimeProvider _time;
@@ -167,6 +169,21 @@ internal sealed class FolderRowViewModel : ObservableObject
     public string ToggleToolTip => IsUnsaved
         ? "Turn ON: adds the folder to your list; the claude rc you started keeps running (use Take over to move it into the app)"
         : "Turn ON or OFF";
+
+    /// <summary>The Show button's accessible name, naming the folder (screen readers read it out of context).</summary>
+    public string ShowAccessibleName => $"Show {Name}";
+
+    /// <summary>The ON/OFF switch's accessible name: what pressing it does, naming the folder.</summary>
+    public string ToggleAccessibleName => IsOn ? $"Turn off {Name}" : $"Turn on {Name}";
+
+    /// <summary>The row menu button's accessible name.</summary>
+    public string MoreAccessibleName => $"More actions for {Name}";
+
+    /// <summary>The Take over button's accessible name.</summary>
+    public string TakeOverAccessibleName => $"Take over {Name}";
+
+    /// <summary>The Restart button's accessible name.</summary>
+    public string RestartAccessibleName => $"Restart {Name}";
 
     /// <summary>The prompt line is shown while waiting.</summary>
     public bool HasPrompt => _row.Status == FolderStatus.Waiting && !string.IsNullOrEmpty(_row.Prompt);

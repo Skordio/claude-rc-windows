@@ -43,7 +43,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
         Assert.Equal(@"C:\data", vm.DataDir);
         Assert.Equal(@"C:\logs", vm.LogDir);
         Assert.Equal("1.2.3", vm.HostVersion);
-        Assert.Equal(@"C:\bin\claude.exe · 2.1.318 (Claude Code)", vm.DetectedClaude);
+        Assert.Equal(@"2.1.318 (Claude Code) · C:\bin\claude.exe", vm.DetectedClaude);
         Assert.Equal(@"missing (\claude-rc-windows\Host)", vm.TaskStatusText);
     }
 
@@ -63,6 +63,16 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
         Assert.False(vm.StartModeIsStartup);
         Assert.True(vm.CanChangeStartMode);
         Assert.False(vm.StartModeChanged);
+    }
+
+    [Fact]
+    public async Task Without_a_task_the_current_mode_says_so()
+    {
+        _task.Info = new HostTaskInfo(HostTaskState.Missing, StartMode.Unknown, TaskPath);
+        var (_, vm) = await Open();
+
+        Assert.Equal("no scheduled task", vm.StartModeText);
+        Assert.True(vm.CanChangeStartMode);
     }
 
     [Fact]
