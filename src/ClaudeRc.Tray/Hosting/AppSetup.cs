@@ -72,11 +72,15 @@ internal interface IProcessStopper
 /// <param name="dialogs">Shows the problems.</param>
 /// <param name="setup">The task, this copy's host and the user.</param>
 /// <param name="trayExe">This copy's ClaudeRc.exe.</param>
+/// <param name="signIn">This copy's sign-in start (SPEC 3.4).</param>
 /// <param name="delay">Waits (tests pass a no-op).</param>
 internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, IHostTask hostTask, IHostConnector host, IRunningTray tray,
-    IProcessStopper processes, Action unregisterNotifications, IDialogs dialogs, StartModeSetup setup, string trayExe,
+    IProcessStopper processes, Action unregisterNotifications, IDialogs dialogs, StartModeSetup setup, string trayExe, SignInStart signIn,
     Func<TimeSpan, CancellationToken, Task> delay)
 {
+    /// <summary><c>--fresh-install</c>: no earlier install was there, so <c>--install</c> turns the sign-in start on.</summary>
+    public bool FreshInstall { get; init; }
+
     /// <summary>The title of the setup's messages.</summary>
     public const string Title = "claude-rc-windows setup";
 
@@ -138,12 +142,22 @@ internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, 
 
     /// <summary>
     /// After the files are copied: the running tray quits (a portable one would otherwise only show
-    /// its window when the installer starts the tray), the task is set up for this copy, the running
+    /// its window when the installer starts the tray), the sign-in start is set (on for a fresh
+    /// install; an upgrade keeps the user's choice), the task is set up for this copy, the running
     /// host is stopped and the task is run.
     /// </summary>
     private async Task InstallAsync(CancellationToken cancellationToken)
     {
         QuitTray();
+        // The tray works without a host, so this does not wait for the task.
+        try
+        {
+            signIn.ApplyInstall(FreshInstall);
+        }
+        catch (Exception e) when (SignInStart.IsRegistryError(e))
+        {
+            _errors.Add($"The app could not be set to start at sign-in: {e.Message} You can turn it on in the app's Settings.");
+        }
         if (!await SetUpTaskAsync(cancellationToken).ConfigureAwait(false))
             return;
         if (!StopHost(throughTask: true))
@@ -190,7 +204,7 @@ internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, 
     /// Before the files are removed. A task that runs another copy (the portable zip) is left alone
     /// with its host and folders; otherwise every saved ON folder is turned OFF through the host
     /// (stopping its session), the host is stopped and the task deleted. Then this copy's exes are
-    /// ended and the toast registration removed.
+    /// ended, its sign-in start and the toast registration removed.
     /// </summary>
     private async Task UninstallAsync(CancellationToken cancellationToken)
     {
@@ -223,6 +237,15 @@ internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, 
                 _errors.Add($"The scheduled task {setup.TaskPath} could not be deleted: {e.Message} "
                     + "Delete it in Task Scheduler (taskschd.msc); a task set up for \"at startup\" may need an administrator.");
             }
+        }
+        // Only a value that starts this exe: another copy's (the portable zip) stays with that copy.
+        try
+        {
+            signIn.RemoveIfThisExe();
+        }
+        catch (Exception e) when (SignInStart.IsRegistryError(e))
+        {
+            _errors.Add($"The app's sign-in start could not be removed: {e.Message} Turn it off in Windows' Startup apps (Settings > Apps > Startup).");
         }
         try
         {

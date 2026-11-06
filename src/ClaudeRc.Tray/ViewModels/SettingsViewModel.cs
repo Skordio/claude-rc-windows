@@ -7,9 +7,10 @@ using CommunityToolkit.Mvvm.Input;
 namespace ClaudeRc.Tray.ViewModels;
 
 /// <summary>
-/// The settings window (SPEC 3.4): start mode (shown, changed only from M4 on), claude.exe path
-/// override with Browse, notifications, and the read-only facts. The settings live in the host;
-/// Save sends <c>settings.set</c>.
+/// The settings window (SPEC 3.4): start mode, claude.exe path override with Browse,
+/// notifications, start the app at sign-in, and the read-only facts. The claude path and
+/// notifications live in the host (Save sends <c>settings.set</c>); the start mode is the
+/// scheduled task and the sign-in start the user's Run key, both changed without the host.
 /// </summary>
 /// <remarks>
 /// It follows the connection while the window is open: when the host goes, the fields become
@@ -25,6 +26,7 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
     private readonly IHostTask _task;
     private readonly IStartModeSwitcher _switcher;
     private readonly IDialogs _dialogs;
+    private readonly SignInStart _signIn;
     private bool _canEdit;
     private string _claudePathOverride = "";
     private bool _notifications = true;
@@ -37,14 +39,19 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
     private StartMode _selectedMode;
     private bool _modeEdited;
     private bool _switching;
+    private SignInStartState? _signInState;
+    private string? _signInError;
+    private bool _startAtSignIn;
+    private bool _signInEdited;
 
     /// <summary>Creates the view-model and follows the connection; call <see cref="LoadAsync"/> before showing it.</summary>
-    public SettingsViewModel(HostConnection connection, IHostTask task, IStartModeSwitcher switcher, IDialogs dialogs)
+    public SettingsViewModel(HostConnection connection, IHostTask task, IStartModeSwitcher switcher, IDialogs dialogs, SignInStart signIn)
     {
         _connection = connection;
         _task = task;
         _switcher = switcher;
         _dialogs = dialogs;
+        _signIn = signIn;
         BrowseCommand = new RelayCommand(Browse);
         SaveCommand = new AsyncRelayCommand(SaveAsync);
         ReenterPasswordCommand = new AsyncRelayCommand(ReenterPasswordAsync);
@@ -95,6 +102,78 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _notifications, value))
                 _edited |= !_applying;
         }
+    }
+
+    /// <summary>
+    /// Start the app at sign-in (SPEC 3.4): a tray setting kept in the user's Run key, so it can be
+    /// changed with or without a host.
+    /// </summary>
+    public bool StartAtSignIn
+    {
+        get => _startAtSignIn;
+        set
+        {
+            if (!SetProperty(ref _startAtSignIn, value))
+                return;
+            _signInEdited = true;
+            OnPropertyChanged(nameof(SignInChanged));
+            OnPropertyChanged(nameof(CanSave));
+        }
+    }
+
+    /// <summary>What the Run value is now when that is not simply this copy on or off (another or a missing exe, Startup apps), or why it could not be read.</summary>
+    public string? SignInNote => _signInError ?? (_signInState is { } s ? _signIn.Describe(s) : null);
+
+    /// <summary>There is a <see cref="SignInNote"/> to show.</summary>
+    public bool HasSignInNote => SignInNote is not null;
+
+    /// <summary>
+    /// Save changes the Run value: the box was changed, or it is ticked and the value starts
+    /// something else (another copy, a moved exe), which saving points at this copy.
+    /// </summary>
+    public bool SignInChanged => _signInState is { } s && (StartAtSignIn != s.IsOn || (StartAtSignIn && s.NeedsFix));
+
+    /// <summary>The sign-in start can be changed: always, except while a start mode switch runs.</summary>
+    public bool CanChangeSignIn => !IsSwitching;
+
+    private void LoadSignIn()
+    {
+        try
+        {
+            _signInState = _signIn.Read();
+            _signInError = null;
+        }
+        catch (Exception e) when (SignInStart.IsRegistryError(e))
+        {
+            _signInState = SignInStartState.None;
+            _signInError = "Whether the app starts at sign-in could not be read: " + e.Message;
+        }
+        if (!_signInEdited)
+            SetProperty(ref _startAtSignIn, _signInState.IsOn, nameof(StartAtSignIn));
+        OnPropertyChanged(nameof(SignInNote));
+        OnPropertyChanged(nameof(HasSignInNote));
+        OnPropertyChanged(nameof(SignInChanged));
+        OnPropertyChanged(nameof(CanSave));
+    }
+
+    /// <summary>Writes the sign-in start; false (and the reason shown) when the registry refused.</summary>
+    private bool SaveSignIn()
+    {
+        try
+        {
+            if (StartAtSignIn)
+                _signIn.Enable();
+            else
+                _signIn.Disable();
+        }
+        catch (Exception e) when (SignInStart.IsRegistryError(e))
+        {
+            ValidationError = "The app's start at sign-in could not be changed: " + e.Message;
+            return false;
+        }
+        _signInEdited = false;
+        LoadSignIn();
+        return true;
     }
 
     /// <summary>The task's start mode in words.</summary>
@@ -152,6 +231,7 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _switching, value))
             {
                 OnPropertyChanged(nameof(CanChangeStartMode));
+                OnPropertyChanged(nameof(CanChangeSignIn));
                 OnPropertyChanged(nameof(CanSave));
             }
         }
@@ -160,8 +240,8 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
     /// <summary>The chosen mode differs from the task's: Save switches it.</summary>
     public bool StartModeChanged => SelectedStartMode is StartMode.Logon or StartMode.Startup && SelectedStartMode != CurrentMode;
 
-    /// <summary>Save does something: the host's settings can be sent, or the start mode switched.</summary>
-    public bool CanSave => !IsSwitching && (CanEdit || StartModeChanged);
+    /// <summary>Save does something: the host's settings can be sent, the sign-in start changed, or the start mode switched.</summary>
+    public bool CanSave => !IsSwitching && (CanEdit || SignInChanged || StartModeChanged);
 
     /// <summary>The startup task needs the Windows password again (SPEC 9.2).</summary>
     public bool NeedsPassword => _taskInfo?.NeedsPassword == true;
@@ -250,6 +330,7 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
     /// <summary>Reads the settings and facts from the host, and the task's state.</summary>
     public async Task LoadAsync()
     {
+        LoadSignIn();
         await LoadTaskAsync();
         if (_connection.State == HostState.Connected)
             await _connection.RefreshSettingsAsync();
@@ -309,9 +390,9 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Checks and sends the settings (while the host is connected), then switches the start mode
-    /// if another one is chosen; true when all of it worked (the window then closes). The
-    /// settings go first: a switch may restart the host.
+    /// Checks and sends the settings (while the host is connected), writes the sign-in start when
+    /// it changed, then switches the start mode if another one is chosen; true when all of it
+    /// worked (the window then closes). The settings go first: a switch may restart the host.
     /// </summary>
     public async Task<bool> SaveAsync()
     {
@@ -333,6 +414,8 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
             _edited = false;
             await _connection.RefreshSettingsAsync();
         }
+        if (SignInChanged && !SaveSignIn())
+            return false;
         if (StartModeChanged)
         {
             var mode = SelectedStartMode;

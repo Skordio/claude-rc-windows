@@ -37,6 +37,14 @@
     <CheckBox Margin="0,14,0,0" IsChecked="{Binding Notifications}" IsEnabled="{Binding CanEdit}"
               Content="Notifications when a folder is failing, waiting for input or missing" />
 
+    <!-- Start the app at sign-in (SPEC 3.4): the user's Run key, changed with or without a host. -->
+    <CheckBox Margin="0,10,0,0" IsChecked="{Binding StartAtSignIn}" IsEnabled="{Binding CanChangeSignIn}"
+              Content="Start the app at sign-in" />
+    <TextBlock Margin="20,2,0,0" Foreground="{StaticResource MutedText}" TextWrapping="Wrap"
+               Text="Puts this app in the notification area when you sign in to Windows, so notifications show. The host starts through its scheduled task either way." />
+    <TextBlock Margin="20,2,0,0" Foreground="{StaticResource ErrorText}" TextWrapping="Wrap" Text="{Binding SignInNote}"
+               Visibility="{Binding HasSignInNote, Converter={StaticResource BoolToVisibility}}" />
+
     <!-- Read-only info -->
     <TextBlock Text="About this host" FontWeight="SemiBold" Margin="0,16,0,4" />
     <Grid>

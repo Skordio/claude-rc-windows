@@ -145,6 +145,32 @@ public class TrayOptionsSetupTests
     }
 
     [Fact]
+    public void Fresh_install_goes_only_with_install()
+    {
+        // The installer passes it when no earlier install was there: sign-in start is then turned on.
+        var o = Parse("--install", "--fresh-install");
+        Assert.True(o.FreshInstall);
+        Assert.Equal(SetupAction.Install, o.Setup);
+        Assert.True(Parse("--install", "--fresh-install", "--quiet", "--instance", "t1").FreshInstall);
+        Assert.False(Parse("--install").FreshInstall);
+        Assert.Throws<ArgumentException>(() => Parse("--fresh-install"));
+        Assert.Throws<ArgumentException>(() => Parse("--uninstall", "--fresh-install"));
+        Assert.Throws<ArgumentException>(() => Parse("--stop-for-update", "--fresh-install"));
+        Assert.Throws<ArgumentException>(() => Parse("--run-host", "--fresh-install"));
+    }
+
+    [Fact]
+    public void Background_starts_the_tray_without_its_window()
+    {
+        // The command of the Run value (SPEC 3.4).
+        Assert.True(Parse("--background").Background);
+        Assert.True(Parse("--background", "--instance", "t1").Background);
+        Assert.False(Parse().Background);
+        Assert.Throws<ArgumentException>(() => Parse("--install", "--background"));
+        Assert.Throws<ArgumentException>(() => Parse("--run-host", "--background"));
+    }
+
+    [Fact]
     public void The_quit_event_is_per_user_and_instance()
     {
         Assert.Equal(@"Local\claude-rc-windows-tray-quit-" + Sid, Parse().QuitEventName);
@@ -169,13 +195,19 @@ public sealed class AppSetupTests
     private readonly FakeElevation _elevation = new();
     private readonly FakeRunningTray _tray;
     private readonly FakeProcessStopper _processes;
+    private readonly FakeStartupRegistry _startup;
     private int _unregistered;
     private int _delays;
+
+    private const string SignInValue = "claude-rc-windows";
+    private const string SignInCommand = "\"" + TrayExe + "\" --background";
+    private const string PortableTray = @"D:\portable\ClaudeRc.exe";
 
     public AppSetupTests()
     {
         _tray = new FakeRunningTray(_journal);
         _processes = new FakeProcessStopper(_journal);
+        _startup = new FakeStartupRegistry(_journal);
         _tasks.Observe = _journal.Add;
         // The switcher sets up the task as the real one would.
         _switcher.OnSwitch = mode => _tasks.Tasks[TaskPath] = new FakeTaskService.Entry
@@ -201,7 +233,8 @@ public sealed class AppSetupTests
             State = state,
         };
 
-    private AppSetup Setup(IStartModeSwitcher? switcher = null, TimeSpan? turnOffTimeout = null) => new(_tasks, switcher ?? _switcher,
+    private AppSetup Setup(IStartModeSwitcher? switcher = null, TimeSpan? turnOffTimeout = null, bool freshInstall = false) => new(_tasks,
+        switcher ?? _switcher,
         new HostTaskManager(_tasks, TaskPath, new ElevatedHostRun(_elevation, TaskPath, ["--run-host"])), _connector, _tray, _processes,
         () =>
         {
@@ -209,6 +242,7 @@ public sealed class AppSetupTests
             _journal.Add("unregister");
         },
         _dialogs, new StartModeSetup(TaskPath, HostExe, [], Account), TrayExe,
+        new SignInStart(_startup, TrayExe, null, _ => true),
         (_, _) =>
         {
             _delays++;
@@ -216,6 +250,7 @@ public sealed class AppSetupTests
         })
     {
         TurnOffTimeout = turnOffTimeout ?? AppSetup.DefaultTurnOffTimeout,
+        FreshInstall = freshInstall,
     };
 
     private int Index(string entry)
@@ -409,6 +444,122 @@ public sealed class AppSetupTests
         Assert.Equal(SetupExitCodes.Failed, await Setup().RunAsync(SetupAction.Install));
 
         Assert.Contains(_dialogs.Errors, e => e.Message.Contains(TrayExe, StringComparison.Ordinal));
+    }
+
+    // ---- sign-in start (SPEC 3.4, 14) ----
+
+    [Fact]
+    public async Task A_fresh_install_starts_this_tray_at_sign_in()
+    {
+        Assert.Equal(SetupExitCodes.Ok, await Setup(freshInstall: true).RunAsync(SetupAction.Install));
+
+        Assert.Equal(SignInCommand, _startup.Run[SignInValue]);
+        // After the running tray quit (it may be another copy, whose value this replaces).
+        Assert.True(Index("quit tray") < Index($"run value {SignInValue}"));
+    }
+
+    [Fact]
+    public async Task An_upgrade_keeps_sign_in_start_off_when_the_user_turned_it_off()
+    {
+        AddTask(StartMode.Logon);
+
+        Assert.Equal(SetupExitCodes.Ok, await Setup().RunAsync(SetupAction.Install));
+
+        Assert.Empty(_startup.Run);
+    }
+
+    [Fact]
+    public async Task An_upgrade_keeps_sign_in_start_on_for_this_copy()
+    {
+        AddTask(StartMode.Logon);
+        _startup.Run[SignInValue] = "\"" + PortableTray + "\" --background";
+
+        Assert.Equal(SetupExitCodes.Ok, await Setup().RunAsync(SetupAction.Install));
+
+        Assert.Equal(SignInCommand, _startup.Run[SignInValue]);
+    }
+
+    [Fact]
+    public async Task Sign_in_start_is_set_up_even_when_the_task_is_not()
+    {
+        // The tray works without a host; it shows why there is none.
+        _switcher.Result = new SwitchResult(SwitchOutcome.Cancelled, "Cancelled.");
+        _switcher.OnSwitch = null;
+
+        Assert.Equal(SetupExitCodes.Failed, await Setup(freshInstall: true).RunAsync(SetupAction.Install));
+
+        Assert.Equal(SignInCommand, _startup.Run[SignInValue]);
+    }
+
+    [Fact]
+    public async Task A_sign_in_start_that_cannot_be_written_is_shown_and_the_host_still_starts()
+    {
+        _startup.Error = new UnauthorizedAccessException("Access to the registry key is denied.");
+
+        Assert.Equal(SetupExitCodes.Failed, await Setup(freshInstall: true).RunAsync(SetupAction.Install));
+
+        var error = Assert.Single(_dialogs.Errors);
+        Assert.Contains("sign-in", error.Message, StringComparison.Ordinal);
+        Assert.Contains("Access to the registry key is denied.", error.Message, StringComparison.Ordinal);
+        Assert.Contains($"run {TaskPath}", _tasks.Calls);
+    }
+
+    [Fact]
+    public async Task Stop_for_update_leaves_sign_in_start_alone()
+    {
+        _startup.Run[SignInValue] = SignInCommand;
+
+        Assert.Equal(SetupExitCodes.Ok, await Setup().RunAsync(SetupAction.StopForUpdate));
+
+        Assert.Equal(SignInCommand, _startup.Run[SignInValue]);
+    }
+
+    [Fact]
+    public async Task Uninstall_removes_this_copys_sign_in_start()
+    {
+        AddTask(StartMode.Logon);
+        _startup.Run[SignInValue] = SignInCommand;
+
+        Assert.Equal(SetupExitCodes.Ok, await Setup().RunAsync(SetupAction.Uninstall));
+
+        Assert.Empty(_startup.Run);
+    }
+
+    [Fact]
+    public async Task Uninstall_leaves_another_copys_sign_in_start()
+    {
+        // The task and the Run value start the portable copy: both stay.
+        AddTask(StartMode.Logon, OtherHost);
+        _startup.Run[SignInValue] = "\"" + PortableTray + "\" --background";
+
+        Assert.Equal(SetupExitCodes.OtherCopy, await Setup().RunAsync(SetupAction.Uninstall));
+
+        Assert.Equal("\"" + PortableTray + "\" --background", _startup.Run[SignInValue]);
+    }
+
+    [Fact]
+    public async Task Uninstall_removes_its_own_sign_in_start_even_when_the_task_is_another_copys()
+    {
+        AddTask(StartMode.Logon, OtherHost);
+        _startup.Run[SignInValue] = SignInCommand;
+
+        Assert.Equal(SetupExitCodes.OtherCopy, await Setup().RunAsync(SetupAction.Uninstall));
+
+        Assert.Empty(_startup.Run);
+    }
+
+    [Fact]
+    public async Task A_sign_in_start_that_cannot_be_removed_is_shown_and_the_uninstall_goes_on()
+    {
+        AddTask(StartMode.Logon);
+        _startup.Error = new UnauthorizedAccessException("Access to the registry key is denied.");
+
+        Assert.Equal(SetupExitCodes.Failed, await Setup().RunAsync(SetupAction.Uninstall));
+
+        var error = Assert.Single(_dialogs.Errors);
+        Assert.Contains("sign-in", error.Message, StringComparison.Ordinal);
+        Assert.False(_tasks.Tasks.ContainsKey(TaskPath));
+        Assert.Equal(1, _unregistered);
     }
 
     // ---- --stop-for-update ----

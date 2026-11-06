@@ -85,9 +85,10 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{ap
 
 [Run]
 ; Sets up the logon task for this copy (a startup task that already runs it is kept), stops any
-; running host and runs the task. Errors are shown by ClaudeRc.exe itself; in a silent install
-; (--quiet) they go to %LOCALAPPDATA%\claude-rc-windows\logs\setup.log instead.
-Filename: "{app}\{#AppExe}"; Parameters: "--install{code:QuietArg}"; StatusMsg: "Setting up the scheduled task and starting the host..."; Flags: waituntilterminated
+; running host and runs the task. A fresh install (--fresh-install) also sets the app to start at
+; sign-in; an upgrade keeps the user's choice. Errors are shown by ClaudeRc.exe itself; in a silent
+; install (--quiet) they go to %LOCALAPPDATA%\claude-rc-windows\logs\setup.log instead.
+Filename: "{app}\{#AppExe}"; Parameters: "--install{code:QuietArg}{code:FreshArg}"; StatusMsg: "Setting up the scheduled task and starting the host..."; Flags: waituntilterminated
 ; The tray app. Not skipped in silent mode, so a silent upgrade brings it back too.
 Filename: "{app}\{#AppExe}"; Description: "Open {#AppName}"; Flags: nowait postinstall
 
@@ -106,6 +107,8 @@ const
 var
   KeepData: Boolean;
   KeepWebView: Boolean;
+  { An earlier install is there (set in PrepareToInstall, before the files are copied). }
+  Upgrade: Boolean;
 
 function OpenProcessToken(ProcessHandle: THandle; DesiredAccess: DWORD; var TokenHandle: THandle): BOOL;
   external 'OpenProcessToken@advapi32.dll stdcall';
@@ -170,6 +173,16 @@ begin
     Result := '';
 end;
 
+{ --fresh-install when no earlier install was there: ClaudeRc.exe --install then sets the app to
+  start at sign-in. An upgrade keeps whatever the user chose (the Run value, or none). }
+function FreshArg(Param: String): String;
+begin
+  if Upgrade then
+    Result := ''
+  else
+    Result := ' --fresh-install';
+end;
+
 { An upgrade: the installed ClaudeRc.exe ends the running tray and host, so their files can be
   replaced. The ON folders start again when --install runs the task afterwards. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -179,7 +192,8 @@ var
 begin
   Result := '';
   Exe := ExpandConstant('{app}\{#AppExe}');
-  if FileExists(Exe) then
+  Upgrade := FileExists(Exe);
+  if Upgrade then
   begin
     if not Exec(Exe, '--stop-for-update' + QuietArg(''), ExpandConstant('{app}'), SW_SHOWNORMAL, ewWaitUntilTerminated, Code) then
       Log('Could not run ' + Exe + ' --stop-for-update: ' + SysErrorMessage(Code))
@@ -197,7 +211,8 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     { Before anything is removed: every saved ON folder OFF (stops the sessions; the list keeps
-      them OFF), tray and host ended, task deleted, toast registration removed. }
+      them OFF), tray and host ended, task deleted, the sign-in start (if it starts this copy) and
+      the toast registration removed. }
     OtherCopy := False;
     Exe := ExpandConstant('{app}\{#AppExe}');
     Params := '--uninstall';

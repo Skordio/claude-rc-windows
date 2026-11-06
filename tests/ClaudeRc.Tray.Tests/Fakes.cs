@@ -418,6 +418,52 @@ internal sealed class FakeRunningTray(List<string>? journal = null) : IRunningTr
     }
 }
 
+/// <summary>The Run key and the Startup apps choices in memory; <see cref="Error"/> makes every call throw.</summary>
+internal sealed class FakeStartupRegistry(List<string>? journal = null) : IStartupRegistry
+{
+    public Dictionary<string, string> Run { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> TurnedOff { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Exception? Error { get; set; }
+
+    private void Check()
+    {
+        if (Error is { } e)
+            throw e;
+    }
+
+    public string? GetRunValue(string name)
+    {
+        Check();
+        return Run.GetValueOrDefault(name);
+    }
+
+    public void SetRunValue(string name, string command)
+    {
+        Check();
+        journal?.Add($"run value {name}");
+        Run[name] = command;
+    }
+
+    public void DeleteRunValue(string name)
+    {
+        Check();
+        journal?.Add($"delete run value {name}");
+        Run.Remove(name);
+    }
+
+    public bool IsTurnedOffInStartupApps(string name)
+    {
+        Check();
+        return TurnedOff.Contains(name);
+    }
+
+    public void ClearStartupAppsChoice(string name)
+    {
+        Check();
+        TurnedOff.Remove(name);
+    }
+}
+
 /// <summary>Processes by exe path: <see cref="Left"/> says how many of an exe's processes "survive" a stop.</summary>
 internal sealed class FakeProcessStopper(List<string>? journal = null) : IProcessStopper
 {

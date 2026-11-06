@@ -23,6 +23,7 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     private readonly IWindows _windows;
     private readonly TimeProvider _time;
     private readonly Func<string, bool> _isNetworkPath;
+    private readonly SignInStart _signIn;
     private HostTaskInfo? _taskInfo;
     private string? _pendingFocus;
     private long _pendingFocusSince;
@@ -43,9 +44,11 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     /// <param name="windows">The other windows.</param>
     /// <param name="time">Clock for the restart countdowns.</param>
     /// <param name="isNetworkPath">Whether a picked folder is on a network or mapped drive (SPEC 3.2).</param>
+    /// <param name="signIn">Starts this app at sign-in (the first run's offer).</param>
     public MainViewModel(HostConnection connection, IHostTask task, IStartModeSwitcher switcher, IDialogs dialogs, IShell shell, IWindows windows,
-        TimeProvider time, Func<string, bool> isNetworkPath)
+        TimeProvider time, Func<string, bool> isNetworkPath, SignInStart signIn)
     {
+        _signIn = signIn;
         _connection = connection;
         _task = task;
         _switcher = switcher;
@@ -146,8 +149,9 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     public Task ReenterPasswordAsync() => SwitchAsync(StartMode.Startup, "Re-enter password");
 
     /// <summary>
-    /// At startup: reads the task and, when there is none (the portable zip's first run, SPEC 14),
-    /// offers to create the logon task. Asked once per run of the tray.
+    /// When the window is shown: reads the task and, when there is none (the portable zip's first
+    /// run, SPEC 14), offers to create the logon task and to start this app at sign-in too. Asked
+    /// once per run of the tray.
     /// </summary>
     public async Task StartupCheckAsync()
     {
@@ -157,9 +161,17 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
         _offeredTask = true;
         if (!_dialogs.Confirm("Start the host at logon",
                 $"No scheduled task starts the claude-rc-windows host ({_taskInfo.TaskPath}), so it doesn't start by itself.\n\n" +
-                "Create it now, so the host starts when you sign in? This needs no administrator rights. " +
-                "You can switch to starting before logon in Settings."))
+                "Create it now, so the host starts when you sign in? This app then starts at sign-in too, in the notification area. " +
+                "This needs no administrator rights. You can switch to starting before logon, or stop this app starting at sign-in, in Settings."))
             return;
+        try
+        {
+            _signIn.Enable();
+        }
+        catch (Exception e) when (SignInStart.IsRegistryError(e))
+        {
+            _dialogs.ShowError("Start the app at sign-in", "This app could not be set to start at sign-in: " + e.Message);
+        }
         await SwitchAsync(StartMode.Logon, "Start the host at logon");
     }
 

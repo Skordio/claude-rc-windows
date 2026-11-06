@@ -31,7 +31,8 @@ section 2 are hard rules.
    - data folder (default `%APPDATA%\claude-rc-windows`) and log folder (default `%LOCALAPPDATA%\claude-rc-windows\logs`);
    - pipe name and mutex name (tests add a random suffix);
    - claude path (tests point at `FakeClaude.exe`);
-   - scheduled task folder (tests use `\claude-rc-windows-test-<guid>\` and delete it afterwards).
+   - scheduled task folder (tests use `\claude-rc-windows-test-<guid>\` and delete it afterwards);
+   - the sign-in start's registry keys (`IStartupRegistry`): never the real `HKCU\...\CurrentVersion\Run`; unit tests use a fake, integration tests `HKCU\Software\claude-rc-windows-test-<guid>`, deleted in `finally`.
    The host takes these overrides on its command line (`--data-dir`, `--log-dir`, `--claude-json`, `--instance <suffix>`). The tray app takes `--instance` too.
 3. **Real `claude rc` runs only in M0 and in manual checks**, always in a throwaway folder under the scratch or `%TEMP%` directory. Back up `%USERPROFILE%\.claude.json` before the first real run.
 4. **No leftover processes.** Every Host integration test asserts that no FakeClaude process is left running after the test.
@@ -119,6 +120,7 @@ Done: see `docs/m5-decisions.md` (the installer's steps are run by ClaudeRc.exe 
 | M2 | Look at the main window and viewer once | Taste and real-use feel |
 | M4 | Switch to `startup` mode: approve UAC, type your Windows password | Needs elevation and your password |
 | M5 | Run the installer, reboot in both modes, take over a hand-started `claude rc`, uninstall | SPEC §17 manual release checks; needs reboots |
+| After M5 | Sign out and in after an install: the tray icon appears without its window; unticked in Settings, no tray at the next sign-in; turned off in Windows' Startup apps, Settings shows it unticked with a note; a moved portable copy's Settings shows the old path and Save fixes it | Needs a real sign-in and the real Run key |
 | M5 | Upgrade in `startup` mode: the host comes back (Task Scheduler may refuse the user the run: UAC for `--run-host`, no password); Start host in `startup` mode; Setup started "as administrator" stops; a `/VERYSILENT` install and uninstall show no message box (data kept, errors in `logs\setup.log`); uninstall while the task runs the portable copy asks nothing and keeps its data | Needs UAC, a real `startup` task and real installs |
 
 ## 6. Total

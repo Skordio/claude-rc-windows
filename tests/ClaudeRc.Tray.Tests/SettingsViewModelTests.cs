@@ -12,11 +12,180 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
     private readonly FakeDialogs _dialogs = new();
     private readonly FakeHostTask _task = new();
     private readonly FakeSwitcher _switcher = new();
+    private readonly FakeStartupRegistry _startup = new();
+    private readonly SignInStart _signIn;
     private readonly HostConnection _connection;
+
+    private const string TrayExe = @"C:\app\ClaudeRc.exe";
+    private const string SignInCommand = "\"" + TrayExe + "\" --background";
 
     public SettingsViewModelTests()
     {
         _connection = new HostConnection(_connector, _time);
+        _signIn = new SignInStart(_startup, TrayExe, null, path => path == TrayExe);
+    }
+
+    private async Task<SettingsViewModel> OpenWithoutHost()
+    {
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
+        var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs, _signIn);
+        await vm.LoadAsync();
+        return vm;
+    }
+
+    // ---- start the app at sign-in (a tray setting: the Run value, with or without a host) ----
+
+    [Fact]
+    public async Task The_sign_in_checkbox_shows_the_run_value()
+    {
+        _startup.Run["claude-rc-windows"] = SignInCommand;
+        var (_, vm) = await Open();
+
+        Assert.True(vm.StartAtSignIn);
+        Assert.Null(vm.SignInNote);
+        Assert.False(vm.SignInChanged);
+    }
+
+    [Fact]
+    public async Task Ticking_sign_in_start_and_saving_writes_this_exe()
+    {
+        var (client, vm) = await Open();
+        var closed = false;
+        vm.CloseRequested += (_, _) => closed = true;
+        Assert.False(vm.StartAtSignIn);
+
+        vm.StartAtSignIn = true;
+        Assert.True(vm.SignInChanged);
+        Assert.True(await vm.SaveAsync());
+
+        Assert.Equal(SignInCommand, _startup.Run["claude-rc-windows"]);
+        Assert.Single(client.Sent<SettingsSetRequest>());
+        Assert.True(closed);
+    }
+
+    [Fact]
+    public async Task Unticking_sign_in_start_and_saving_deletes_the_value()
+    {
+        _startup.Run["claude-rc-windows"] = SignInCommand;
+        var (_, vm) = await Open();
+
+        vm.StartAtSignIn = false;
+        Assert.True(await vm.SaveAsync());
+
+        Assert.Empty(_startup.Run);
+    }
+
+    [Fact]
+    public async Task Sign_in_start_can_be_changed_without_a_host()
+    {
+        using var vm = await OpenWithoutHost();
+        Assert.False(vm.CanEdit);
+        Assert.True(vm.CanChangeSignIn);
+        Assert.False(vm.CanSave);
+
+        vm.StartAtSignIn = true;
+        Assert.True(vm.CanSave);
+        Assert.True(await vm.SaveAsync());
+
+        Assert.Equal(SignInCommand, _startup.Run["claude-rc-windows"]);
+        Assert.Empty(_switcher.Calls);
+    }
+
+    [Fact]
+    public async Task A_value_for_a_missing_exe_is_shown_and_saving_fixes_it()
+    {
+        // A portable copy that was moved.
+        _startup.Run["claude-rc-windows"] = "\"D:\\old\\ClaudeRc.exe\" --background";
+        using var vm = await OpenWithoutHost();
+
+        Assert.True(vm.StartAtSignIn);
+        Assert.Contains(@"D:\old\ClaudeRc.exe", vm.SignInNote, StringComparison.Ordinal);
+        // Untouched, Save still has something to do.
+        Assert.True(vm.SignInChanged);
+        Assert.True(vm.CanSave);
+
+        Assert.True(await vm.SaveAsync());
+
+        Assert.Equal(SignInCommand, _startup.Run["claude-rc-windows"]);
+        Assert.Null(vm.SignInNote);
+        Assert.False(vm.SignInChanged);
+    }
+
+    [Fact]
+    public async Task Turned_off_in_windows_startup_apps_shows_unticked_with_a_note()
+    {
+        _startup.Run["claude-rc-windows"] = SignInCommand;
+        _startup.TurnedOff.Add("claude-rc-windows");
+        var (_, vm) = await Open();
+
+        Assert.False(vm.StartAtSignIn);
+        Assert.Contains("Startup apps", vm.SignInNote, StringComparison.Ordinal);
+        Assert.False(vm.SignInChanged);
+
+        vm.StartAtSignIn = true;
+        Assert.True(await vm.SaveAsync());
+
+        Assert.Empty(_startup.TurnedOff);
+        Assert.True(vm.StartAtSignIn);
+    }
+
+    [Fact]
+    public async Task A_registry_error_on_save_is_shown_and_the_window_stays_open()
+    {
+        var (_, vm) = await Open();
+        var closed = false;
+        vm.CloseRequested += (_, _) => closed = true;
+        vm.StartAtSignIn = true;
+        _startup.Error = new UnauthorizedAccessException("Access to the registry key is denied.");
+
+        Assert.False(await vm.SaveAsync());
+
+        Assert.Contains("Access to the registry key is denied.", vm.ValidationError, StringComparison.Ordinal);
+        Assert.False(closed);
+    }
+
+    [Fact]
+    public async Task A_run_key_that_cannot_be_read_says_so()
+    {
+        _startup.Error = new UnauthorizedAccessException("Access to the registry key is denied.");
+        var (_, vm) = await Open();
+
+        Assert.False(vm.StartAtSignIn);
+        Assert.Contains("Access to the registry key is denied.", vm.SignInNote, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Sign_in_start_is_saved_before_a_start_mode_switch()
+    {
+        // A switch can fail (UAC declined); the sign-in start is kept anyway.
+        _task.Info = Exists(StartMode.Logon);
+        _switcher.Result = new SwitchResult(SwitchOutcome.Cancelled, "Cancelled.");
+        var (_, vm) = await Open();
+        vm.StartAtSignIn = true;
+        vm.StartModeIsStartup = true;
+
+        Assert.False(await vm.SaveAsync());
+
+        Assert.Equal(SignInCommand, _startup.Run["claude-rc-windows"]);
+        Assert.False(vm.SignInChanged);
+    }
+
+    [Fact]
+    public async Task A_reconnect_keeps_the_ticked_sign_in_box()
+    {
+        var (client, vm) = await Open();
+        using var owned = vm;
+        vm.StartAtSignIn = true;
+
+        client.Close();
+        await Eventually.True(() => !vm.CanEdit, "read-only");
+        _connector.Enqueue(new FakeHostClient());
+        _connection.ReconnectNow();
+        await Eventually.True(() => vm.CanEdit, "editable again");
+
+        Assert.True(vm.StartAtSignIn);
+        Assert.True(vm.SignInChanged);
     }
 
     public async ValueTask DisposeAsync() => await _connection.DisposeAsync();
@@ -27,7 +196,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
         _connector.Enqueue(client);
         _connection.Start();
         await Eventually.True(() => _connection.State == HostState.Connected, "connected");
-        var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs);
+        var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs, _signIn);
         await vm.LoadAsync();
         return (client, vm);
     }
@@ -180,7 +349,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
         _task.Info = Exists(StartMode.Logon);
         _connection.Start();
         await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
-        using var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs);
+        using var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs, _signIn);
         await vm.LoadAsync();
         Assert.False(vm.CanEdit);
         Assert.True(vm.CanChangeStartMode);
@@ -298,7 +467,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
     {
         _connection.Start();
         await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
-        var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs);
+        var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs, _signIn);
         await vm.LoadAsync();
 
         Assert.False(vm.CanEdit);
@@ -311,7 +480,7 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
     {
         _connection.Start();
         await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
-        using var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs);
+        using var vm = new SettingsViewModel(_connection, _task, _switcher, _dialogs, _signIn);
         await vm.LoadAsync();
         Assert.False(vm.CanEdit);
 

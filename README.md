@@ -43,7 +43,9 @@ Windows on Arm), and `SHA256SUMS.txt`.
 
 **Installer** (`claude-rc-windows-<version>-win-x64-setup.exe`): per-user, no administrator
 rights. It installs to `%LOCALAPPDATA%\Programs\claude-rc-windows`, adds a Start menu shortcut,
-creates the scheduled task (start at logon), starts the host and opens the app. Running a newer
+creates the scheduled task (start at logon), sets the app to start at sign-in (in the notification
+area, without its window; Settings can turn that off, and an upgrade keeps your choice), starts
+the host and opens the app. Running a newer
 installer upgrades in place: it closes the app and stops the host (your ON folders stop), replaces
 the files, and starts them again; a start-at-startup setup is kept (starting its task may need
 administrator approval, UAC, but not your password). Run the installer normally, not "as
@@ -53,9 +55,11 @@ messages; they go to `%LOCALAPPDATA%\claude-rc-windows\logs\setup.log`.
 
 **Portable** (`claude-rc-windows-<version>-win-x64-portable.zip`): unzip anywhere you can keep
 it and run `ClaudeRc.exe`. The first time (and each time it finds no scheduled task) it offers
-to create the start-at-logon task for the `ClaudeRcHost.exe` next to it; no administrator rights
-needed. If you move the folder later, delete `\claude-rc-windows\Host` in Task Scheduler and start
-`ClaudeRc.exe` again: it offers to create the task for the new place.
+to create the start-at-logon task for the `ClaudeRcHost.exe` next to it, and to start the app at
+sign-in too; no administrator rights needed. If you move the folder later, delete
+`\claude-rc-windows\Host` in Task Scheduler and start `ClaudeRc.exe` again: it offers to create the
+task for the new place. Its Settings then show that the sign-in start points at the old place;
+Save points it at the new one.
 
 ### "Windows protected your PC"
 
@@ -83,8 +87,11 @@ first time. Click **More info**, then **Run anyway**. You can check a download a
   outside the app)". The app never touches it, except when you press **Take over**: that stops it
   and starts it again inside the app, so it gets a console and is kept running.
 - Closing the window hides it to the tray; sessions keep running. **Quit tray** in the tray menu
-  closes only the app. The app is not started at logon by itself (the host is): open it from the
-  Start menu when you want the list, the consoles or the notifications.
+  closes only the app. The app starts at sign-in in the notification area (click its icon for the
+  window), so notifications show; **Start the app at sign-in** in Settings turns that off or on.
+  It needs no host and is not the host's start: the host starts by its scheduled task either way
+  (start modes below). Windows' own Startup apps list (Settings > Apps > Startup) shows it as
+  `claude-rc-windows`; turning it off there works too.
 
 ### Start modes (Settings)
 
@@ -107,6 +114,7 @@ starts again.
 | Logs | `%LOCALAPPDATA%\claude-rc-windows\logs` (`host.log`; `folders\*.log` per folder: starts, exits, restarts, take overs, prompts, never console output; `setup.log` only after a silent install's errors) |
 | Console viewer data | `%LOCALAPPDATA%\claude-rc-windows\webview2` |
 | Scheduled task | `\claude-rc-windows\Host` in Task Scheduler |
+| Start the app at sign-in | The `claude-rc-windows` value in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 | Claude's own settings | `%USERPROFILE%\.claude.json`: the app only sets `hasTrustDialogAccepted` and, when missing, `remoteControlSpawnMode` for your folders |
 
 Settings shows the data and log folders, the host's version and the task's status.
@@ -114,7 +122,8 @@ Settings shows the data and log folders, the host's version and the task's statu
 ## Uninstall
 
 **Settings > Apps > Installed apps > claude-rc-windows > Uninstall**. It turns every folder OFF
-(stopping their sessions), closes the app, stops the host, deletes the scheduled task, removes the app's notification registration, the program and the
+(stopping their sessions), closes the app, stops the host, deletes the scheduled task, removes the
+app's start at sign-in and its notification registration, the program and the
 console viewer's data, and asks whether to keep your folder list, settings and logs (Yes keeps them
 for a later install, with every folder OFF: turn them on again after installing). A silent
 uninstall keeps them without asking. If the scheduled task runs another copy (you moved to the
@@ -124,8 +133,8 @@ administrator rights; if the uninstall can't delete it, it says so, and you can 
 `\claude-rc-windows\Host` in Task Scheduler.
 
 For the portable zip, run `ClaudeRc.exe --uninstall` from its folder: it does the same steps
-(folders OFF, app closed, host stopped, task deleted if it runs this copy, notification
-registration removed). Then delete the folder, and `%APPDATA%\claude-rc-windows` and
+(folders OFF, app closed, host stopped, task deleted if it runs this copy, its start at sign-in
+and notification registration removed). Then delete the folder, and `%APPDATA%\claude-rc-windows` and
 `%LOCALAPPDATA%\claude-rc-windows` if you don't want to keep your list and logs.
 
 ## Build from source

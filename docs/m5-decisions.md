@@ -80,9 +80,8 @@ portable build, compiles the installer and writes `artifacts/release/SHA256SUMS.
   (`UninstallSilent`; `SuppressibleMsgBox` asked anyway without `/SUPPRESSMSGBOXES`, section 8). SPEC 14 asked only
   about the data folder; the logs follow the same answer, as keeping a log folder for an app whose
   list was deleted (or the other way round) makes no sense. `.claude.json` is never touched.
-- The tray is not started at logon (no `Run` key): SPEC never asked for it, the host is what runs
-  at logon. The README says to open the app from the Start menu. A "start the tray at sign-in"
-  option would be a spec change (notifications only show while the tray runs).
+- The tray was first not started at logon. That changed after M5: it now starts at sign-in by
+  default, through a `Run` value, with a Settings checkbox (section 9).
 
 ## 3. The installer's steps in ClaudeRc.exe (`Hosting/AppSetup.cs`)
 
@@ -264,3 +263,69 @@ exist yet) and passed after the implementation.
   host's task, no task, Task Scheduler's error); `SetupLogDialogsTests`. All ran against stubs
   first (24 failing), then passed. The installer script was compiled with ISCC; it was not run.
 
+
+## 9. Start the tray at sign-in (after M5)
+
+The user asked for it: on by default, with an on/off checkbox in Settings (SPEC 3.4). Toasts come
+from the tray (SPEC 3.5), so with only the host starting at logon they showed only after the user
+had opened the app.
+
+- **Mechanism: the user's Run key**, `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value
+  `claude-rc-windows` (`claude-rc-windows-<instance>`), `"<this ClaudeRc.exe>" --background`
+  (`--instance <instance>` added for a test instance). No admin, no task, and it is what Windows'
+  Startup apps list shows and lets the user turn off. A second scheduled task (or a trigger on the
+  host's) was the other choice: more Task Scheduler code, and it would not show in Startup apps.
+  A Startup-folder shortcut would need a shortcut writer and gains nothing.
+- **The value is the setting.** The tray has no settings file, and a marker beside the value
+  would be a second record that can disagree with it. Settings reads the value each time it
+  opens; the checkbox is ticked when a value of this name exists and Windows' Startup apps list
+  has not turned it off. It is a tray setting: it is saved with or without a host (the host's
+  settings still need the host).
+- **Always this exe.** `SignInStart` writes `Environment.ProcessPath` (the installer steps: the
+  `ClaudeRc.exe` next to the host), quoted, with only `--background` and the instance. Nothing on
+  any command line can make it write another path.
+- **Another copy or a missing exe** (a portable folder that was moved): Settings ticks the box
+  and says what the value starts ("another copy of the app: …" or "…, which no longer exists"),
+  and `SignInChanged` is true even untouched, so Save points it at this exe. The same happens for
+  this exe with other options (no quotes, no `--background`, another instance's arguments).
+- **Windows' Startup apps choice** (`…\Explorer\StartupApproved\Run\<name>`, 12 bytes: an even
+  first byte is on, an odd one off): read, so a value the user turned off there shows unticked
+  with a note. Ticking it and saving (and the portable first run's Yes) also deletes that entry,
+  which Windows reads as on. An upgrade never clears it.
+- **Fresh install vs upgrade.** Setup knows it exactly: `PrepareToInstall` already checks for
+  `{app}\ClaudeRc.exe` before any file is copied (that is when it runs `--stop-for-update`). With
+  none it passes `--install --fresh-install`, and `--install` then turns the sign-in start on.
+  Without it (an upgrade) no value means the user turned it off and stays so; a value is pointed
+  at this exe if it starts another one (the task moves to this copy too). A "user turned it off"
+  marker was the other choice; it would be a second record, and it would also need clearing at
+  uninstall. No released version predates this (none is released yet), so no upgrade comes from
+  a version that never set the value. `--fresh-install` goes only with `--install` (anything else
+  is refused, as for the other steps) and takes no value. The sign-in start is set right after the
+  running tray quits, before the task: the tray works without a host, so a task that was not set
+  up does not skip it; a registry error is reported with the rest.
+- **Uninstall** deletes the value (and a Startup apps entry of that name) only when it starts this
+  `ClaudeRc.exe`, compared by full path, case-insensitively: another copy's stays with that copy,
+  also when the task is this copy's.
+- **Portable first run**: the existing offer (no task) now says the app starts at sign-in too,
+  and that Settings can turn that off; Yes writes the value (a failure is shown, the task is still
+  created), No writes nothing. One question rather than two.
+- **`--background`**: the tray starts with its icon and connection but no window. The task check
+  and its first-run offer moved from start-up to the window's first show in each run (`ShowMain`
+  calls `StartupCheckAsync`, which offers once per run and otherwise only re-reads the task for
+  the status bar), so nothing pops up at sign-in; the offer comes when the user opens the app. A
+  `--background` start that finds a tray already running exits without showing that tray's window.
+  `--background` is refused beside the installer steps and `--run-host`.
+- **Tests never touch the real Run key**: everything goes through `IStartupRegistry`; the unit tests
+  use `FakeStartupRegistry`, and `RegistryStartupTests` runs `RegistryStartup` against
+  `HKCU\Software\claude-rc-windows-test-<guid>\Run` and `…\StartupApproved\Run`, deleted in
+  `finally` and in `Dispose`. 59 more tray tests (555): `SignInStartTests`, `RegistryStartupTests`,
+  `TrayOptionsSetupTests` (`--fresh-install`, `--background`), `AppSetupTests` (fresh install on,
+  upgrade keeps off and keeps on for this copy, set even when the task is not, errors shown, stop-for-update
+  leaves it, uninstall removes only this exe's value), `SettingsViewModelTests` (reads, writes,
+  deletes, without a host, missing exe fixed by Save, Startup apps, registry errors, saved before a
+  start mode switch, kept across a reconnect), `MainViewModelTests` (first run Yes and No, a
+  failure). All ran against stubs first (53 failing; the "changes nothing" cases passed), then
+  passed.
+- **Manual**: sign out and in after an install: the tray icon appears without its window, and the
+  host is connected; untick it in Settings and sign in again: no tray; turn it off in Windows'
+  Startup apps: Settings shows it unticked with the note.

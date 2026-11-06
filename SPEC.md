@@ -90,7 +90,8 @@ Closing the window hides it to the tray; sessions keep running. Tray menu:
 Open, Add folder, Settings, Quit tray (sessions keep running: the host is a
 separate process). There is no "stop everything" in the tray; turn folders
 OFF instead. One tray app runs per user session; starting it again shows the
-running one's window.
+running one's window. By default the tray app starts at sign-in, in the
+notification area without opening the window (3.4).
 
 ### 3.2 Adding a folder
 **+ Add folder** opens the native Windows "Select folder" dialog (any local
@@ -141,12 +142,29 @@ forwarded to the pseudo-console.
 - **claude.exe path**: auto-detected (see 6.1); override field + Browse. The
   override must be a full path to a `.exe` or a `claude.cmd` npm shim (6.1).
 - **Notifications**: on/off (default on).
+- **Start the app at sign-in**: on/off (default on: the installer turns it on,
+  14). On is a value in the user's Run key,
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, named
+  `claude-rc-windows` (`claude-rc-windows-<instance>` for a test instance):
+  `"<this ClaudeRc.exe>" --background` (and `--instance <instance>`). Windows
+  then starts the tray app at sign-in in the notification area, without its
+  window; the first-run offer (14) waits until the window is first opened, and
+  a tray that already runs is left as it is. The value is the only record of the
+  setting (the tray app has no settings file of its own): it is a tray setting,
+  not a host one, so it can be changed with or without a host, and it always
+  names the running ClaudeRc.exe, never another path. Off deletes the value. A
+  value that starts another copy or an exe that no longer exists (a portable
+  folder that was moved) is shown under the checkbox, which is ticked, and Save
+  points it at this exe. A value the user turned off in Windows' own Startup
+  apps list (`…\Explorer\StartupApproved\Run`) shows unticked with a note;
+  ticking it and saving turns it on there too.
 - Read-only info: data folder, log folder, host version, task status (health,
   task name, last and next run).
 
-The settings live in the host (`settings.get` / `settings.set`, 10), so they
-can be changed only while the host is connected; otherwise the window says
-so. The open window follows the connection: it turns read-only with that note
+The claude path and notifications live in the host (`settings.get` /
+`settings.set`, 10), so they can be changed only while the host is connected;
+otherwise the window says so (the start mode and the sign-in start stay
+changeable). The open window follows the connection: it turns read-only with that note
 when the host goes, and loads the settings again when the host comes back
 (fields the user has already changed keep what they typed). The tray checks
 the override (full path, `.exe` or `.cmd`) before sending it; the host checks
@@ -155,7 +173,9 @@ it again (6.1).
 ### 3.5 Notifications
 Windows toast when a folder becomes `failing`, `waiting`, or `missing`
 (once per transition, not repeated while it stays there). Clicking it opens
-the main window at that row. Off via settings.
+the main window at that row. Off via settings. Toasts come from the tray app,
+so they show only while it runs; that is why it starts at sign-in by default
+(3.4).
 
 The host sends the `toast` event (10) only while notifications are on; the
 tray checks the setting it read too, and shows a status for a folder only
@@ -388,7 +408,10 @@ Adopted sessions have no console to read, so they never show `waiting`.
 ## 9. Start modes
 
 There is always exactly one scheduled task, `\claude-rc-windows\Host`, that
-runs `ClaudeRcHost.exe` as the user.
+runs `ClaudeRcHost.exe` as the user. Only the host starts through the task; the
+tray app starts at sign-in through the user's Run key (3.4), which needs no
+task and no admin, and works in either start mode (in `startup` mode the host
+is already running when the tray app starts).
 
 ### 9.1 `logon` (default)
 Trigger "At log on" of this user, "Run only when user is logged on". Set up
@@ -522,6 +545,10 @@ means N files in total, the current one included: a rolled file becomes
 `<name>.1`, older ones `<name>.2`, …. Each entry is one line,
 `<local ISO-8601 time> <message>`.
 
+The tray app's one setting of its own, start at sign-in, is not a file: it is
+the `claude-rc-windows[-instance]` value in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (3.4).
+
 ## 12. Security
 
 - No network listener; the named pipe accepts only the user's account, and
@@ -568,9 +595,12 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
 - **Installer** (Inno Setup, per-user, no admin; one per architecture, x64 and
   arm64): installs to
   `%LOCALAPPDATA%\Programs\claude-rc-windows`, Start menu shortcut, creates
-  the `logon` task, starts the host and tray app. Uninstall: turns every
+  the `logon` task, sets the tray app to start at sign-in (3.4; a fresh install
+  only, an upgrade keeps the user's choice), starts the host and tray app.
+  Uninstall: turns every
   folder OFF (stops sessions; the host saves them OFF), deletes the task,
-  removes the toast registration (3.5), removes the program and
+  removes the sign-in start if it starts this copy, removes the toast
+  registration (3.5), removes the program and
   `%LOCALAPPDATA%\claude-rc-windows\webview2`; asks
   whether to keep `%APPDATA%\claude-rc-windows` and the logs
   (`%LOCALAPPDATA%\claude-rc-windows\logs`). A kept folder list has every
@@ -585,9 +615,16 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
   account). With UAC off there is no split token and Setup runs.
   The task, the host and the folders are handled by the installed
   `ClaudeRc.exe` itself, with three installer steps that take no path or
-  account (only `--instance`), so the task is the same one the app builds (9):
-  - `--install`, after the files are copied: the running tray quits; a
-    `startup` task that already runs this copy's host is kept (setting it up
+  account (only `--instance`, `--quiet` and `--install`'s `--fresh-install`),
+  so the task is the same one the app builds (9):
+  - `--install [--fresh-install]`, after the files are copied: the running
+    tray quits; the sign-in start (3.4) is set: with `--fresh-install`, which
+    Setup passes when no earlier install was in the program folder, it is
+    turned on for this exe; on an upgrade a value of the app's name is kept
+    (pointed at this exe if it started another one, a Startup apps choice
+    kept) and no value stays none, since that means the user turned it off
+    (a failure here is reported; the task is still set up). Then a `startup`
+    task that already runs this copy's host is kept (setting it up
     again would need UAC and the password), another `startup` task becomes
     this copy's `startup` task through the elevated helper (9.2), anything else
     becomes this copy's `logon` task; then the running host is stopped and the
@@ -598,7 +635,8 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
     ON folders start again when `--install` runs the task).
   - `--uninstall`: as above. A task that runs another copy's `ClaudeRcHost.exe`
     (the portable zip) is left alone, with its host and folders; the exit code
-    (3) tells the uninstaller to keep the data. The folders are turned OFF
+    (3) tells the uninstaller to keep the data. The sign-in start's Run value is
+    deleted only when it starts this `ClaudeRc.exe` (another copy's stays). The folders are turned OFF
     within 45 s (15 s for the sessions to stop, 30 s more for a slow host); a
     host that does not answer by then, or a pipe that refuses the connection,
     is reported and the uninstall goes on (the host is stopped, its sessions
@@ -616,9 +654,11 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
   `ClaudeRc.exe` of this copy still running after that is ended. Every problem
   is shown once at the end, and each step still runs.
 - **Portable zip**: same exes; first run of the tray app offers to create the
-  `logon` task: whenever the tray starts and finds no task, it asks once (no
-  admin needed). Yes creates it and, if no host answers, runs it; No asks again
-  at the tray's next start. The task runs the `ClaudeRcHost.exe` next to
+  `logon` task: whenever the tray's window is first shown in a run and there is
+  no task, it asks once (no admin needed). Yes creates it and, if no host
+  answers, runs it, and also turns the sign-in start (3.4) on for this exe (the
+  question says so, and that Settings can turn it off); No changes neither and
+  asks again at the tray's next start. The task runs the `ClaudeRcHost.exe` next to
   `ClaudeRc.exe`. To remove it, `ClaudeRc.exe --uninstall` in its folder does
   the uninstaller's steps (the README says so; the other two steps stay
   internal, 15).
@@ -636,7 +676,8 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
 Update check, per-folder options, auto-update, signing, multiple users per
 host, running folders as another account, a CLI. Each is a separate issue
 when wanted. (`ClaudeRc.exe` takes a few internal options for the elevated
-helpers, 9.2 and 9.4, and the installer, 14; they are not a CLI.)
+helpers, 9.2 and 9.4, the installer, 14, and the sign-in start's
+`--background`, 3.4; they are not a CLI.)
 
 ## 16. Milestones
 
@@ -671,6 +712,7 @@ helpers, 9.2 and 9.4, and the installer, 14; they are not a CLI.)
   input reaching the process, `--name` with spaces/quotes/`&`/`%` reaching
   the process unchanged, and adopting an externally started FakeClaude.
 - **Manual on real Windows (each release)**: install, add a git repo folder
-  (no prompts), reboot in both modes, toggle OFF, take over a hand-started
+  (no prompts), reboot in both modes (the tray icon appears at sign-in without
+  its window; Settings can turn that off), toggle OFF, take over a hand-started
   `claude rc`, uninstall.
 - CI: `windows-latest`, `dotnet test` on every push and PR.

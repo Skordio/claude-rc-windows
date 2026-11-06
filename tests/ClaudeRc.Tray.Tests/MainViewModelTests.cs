@@ -17,12 +17,17 @@ public sealed class MainViewModelTests : IAsyncDisposable
     private readonly FakeWindows _windows = new();
     private readonly HostConnection _connection;
     private readonly HashSet<string> _networkPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly FakeStartupRegistry _startup = new();
+    private readonly SignInStart _signIn;
     private readonly MainViewModel _vm;
+
+    private const string TrayExe = @"D:\portable\ClaudeRc.exe";
 
     public MainViewModelTests()
     {
         _connection = new HostConnection(_connector, _time);
-        _vm = new MainViewModel(_connection, _task, _switcher, _dialogs, _shell, _windows, _time, _networkPaths.Contains);
+        _signIn = new SignInStart(_startup, TrayExe, null, _ => true);
+        _vm = new MainViewModel(_connection, _task, _switcher, _dialogs, _shell, _windows, _time, _networkPaths.Contains, _signIn);
     }
 
     public async ValueTask DisposeAsync() => await _connection.DisposeAsync();
@@ -193,6 +198,36 @@ public sealed class MainViewModelTests : IAsyncDisposable
         // No host answers yet, so the new task is run straight away.
         Assert.Equal([(StartMode.Logon, true)], _switcher.Calls);
         Assert.Equal("Start mode: at logon · running", _vm.StartModeText);
+    }
+
+    [Fact]
+    public async Task First_run_yes_also_starts_this_app_at_sign_in()
+    {
+        await _vm.StartupCheckAsync();
+
+        var (_, message) = Assert.Single(_dialogs.Confirms);
+        Assert.Contains("this app", message, StringComparison.Ordinal);
+        Assert.Contains("Settings", message, StringComparison.Ordinal);
+        Assert.Equal("\"" + TrayExe + "\" --background", _startup.Run["claude-rc-windows"]);
+    }
+
+    [Fact]
+    public async Task First_run_no_does_not_start_the_app_at_sign_in()
+    {
+        _dialogs.ConfirmAnswer = false;
+        await _vm.StartupCheckAsync();
+        Assert.Empty(_startup.Run);
+    }
+
+    [Fact]
+    public async Task First_run_sign_in_start_that_fails_is_shown_and_the_task_is_still_created()
+    {
+        _startup.Error = new UnauthorizedAccessException("Access to the registry key is denied.");
+
+        await _vm.StartupCheckAsync();
+
+        Assert.Contains("Access to the registry key is denied.", Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
+        Assert.Equal(StartMode.Logon, Assert.Single(_switcher.Calls).Mode);
     }
 
     [Fact]

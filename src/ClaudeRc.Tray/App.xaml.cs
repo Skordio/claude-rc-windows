@@ -99,9 +99,13 @@ internal partial class App
         _mutex = new Mutex(true, options.MutexName, out var first);
         if (!first)
         {
-            // Let the first instance take the foreground: this process has it, being just launched.
-            AllowSetForegroundWindow(AsfwAny);
-            _showEvent.Set();
+            // The sign-in start finds a tray already running (started by hand): it opens nothing.
+            if (!options.Background)
+            {
+                // Let the first instance take the foreground: this process has it, being just launched.
+                AllowSetForegroundWindow(AsfwAny);
+                _showEvent.Set();
+            }
             _showEvent.Dispose();
             _showEvent = null;
             _quitEvent.Dispose();
@@ -130,8 +134,11 @@ internal partial class App
             else
                 await Task.Yield();
         });
-        var windows = new WpfWindows(_connection, task, switcher, dialogs, options.WebViewDataDir);
-        _vm = new MainViewModel(_connection, task, switcher, dialogs, new ShellLauncher(), windows, time, FolderPaths.IsNetworkPath);
+        // Start the app at sign-in (SPEC 3.4): the Run value always names this exe.
+        var signIn = new SignInStart(RegistryStartup.ForCurrentUser(), Environment.ProcessPath ?? throw new InvalidOperationException("no process path"),
+            options.Instance, File.Exists);
+        var windows = new WpfWindows(_connection, task, switcher, dialogs, signIn, options.WebViewDataDir);
+        _vm = new MainViewModel(_connection, task, switcher, dialogs, new ShellLauncher(), windows, time, FolderPaths.IsNetworkPath, signIn);
         windows.SettingsSaved += async (_, _) => await _vm.LoadTaskInfoAsync();
         _main = new MainWindow(_vm, options.Instance);
         MainWindow = _main;
@@ -150,9 +157,9 @@ internal partial class App
         _toasts = new ToastRouter(_connection, _notifier, path => Dispatcher.BeginInvoke(() => OpenRow(path)));
 
         _connection.Start();
-        ShowMain();
-        // Reads the task; a portable first run (no task) offers to create the logon task (SPEC 14).
-        _ = _vm.StartupCheckAsync();
+        // Started at sign-in (--background, SPEC 3.4): only the tray icon until the user opens the window.
+        if (!options.Background)
+            ShowMain();
     }
 
     /// <summary>
@@ -226,6 +233,7 @@ internal partial class App
         {
             var tasks = new WindowsTaskService();
             var setup = new StartModeSetup(options.TaskPath, options.HostExe, options.HostArguments, account);
+            var trayExe = Path.Combine(Path.GetDirectoryName(options.AppHostExe)!, "ClaudeRc.exe");
             var switcher = new StartModeSwitcher(tasks,
                 new ShellElevation(Environment.ProcessPath ?? throw new InvalidOperationException("no process path")),
                 setup, (m, restart) => options.HelperArguments(m, account, restart), File.Exists, (delay, ct) => Task.Delay(delay, ct));
@@ -233,7 +241,11 @@ internal partial class App
                 new PipeHostConnector(options.PipeName),
                 new WindowsRunningTray(options.MutexName, options.QuitEventName), new WindowsProcessStopper(),
                 ToolkitToastNotifier.Unregister, dialogs, setup,
-                Path.Combine(Path.GetDirectoryName(options.AppHostExe)!, "ClaudeRc.exe"), (delay, ct) => Task.Delay(delay, ct));
+                trayExe, new SignInStart(RegistryStartup.ForCurrentUser(), trayExe, options.Instance, File.Exists),
+                (delay, ct) => Task.Delay(delay, ct))
+            {
+                FreshInstall = options.FreshInstall,
+            };
             code = await appSetup.RunAsync(action);
         }
 #pragma warning disable CA1031 // The installer's step reports anything that goes wrong and exits.
@@ -288,7 +300,18 @@ internal partial class App
         return _connection is null ? name : $"{name}\n{_connection.StateText}";
     }
 
-    private void ShowMain() => _main?.ShowAndActivate();
+    /// <summary>
+    /// Shows the window and reads the task for its status bar. With no task (a portable first run,
+    /// SPEC 14) the first show offers to create it, so a tray started at sign-in asks nothing until
+    /// the user opens it; the offer is made once per run.
+    /// </summary>
+    private void ShowMain()
+    {
+        if (_main is null)
+            return;
+        _main.ShowAndActivate();
+        _ = _vm?.StartupCheckAsync();
+    }
 
     private void OpenRow(string path)
     {

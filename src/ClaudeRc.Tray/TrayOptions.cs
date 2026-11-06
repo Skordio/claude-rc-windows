@@ -9,7 +9,8 @@ namespace ClaudeRc.Tray;
 /// and for the elevated start-mode helper (SPEC 9.2)
 /// <c>--set-start-mode logon|startup --for-user &lt;DOMAIN\name&gt; [--restart-host]</c>, and for the installer
 /// (SPEC 14) <c>--install</c>, <c>--stop-for-update</c> or <c>--uninstall</c> (each optionally
-/// <c>--quiet</c>), and for the elevated run-host helper (SPEC 9.4) <c>--run-host</c>. The instance suffix is
+/// <c>--quiet</c>; <c>--install</c> also <c>--fresh-install</c>), for the sign-in start (SPEC 3.4)
+/// <c>--background</c>, and for the elevated run-host helper (SPEC 9.4) <c>--run-host</c>. The instance suffix is
 /// added to the pipe name (so it meets the host started with the same <c>--instance</c>), to the
 /// single-instance names, and to the scheduled task folder, so a test tray never runs the real task.
 /// </summary>
@@ -55,6 +56,12 @@ internal sealed record TrayOptions
 
     /// <summary>Where a quiet setup step writes its errors: <c>%LOCALAPPDATA%\claude-rc-windows[-instance]\logs\setup.log</c>.</summary>
     public string SetupLogPath { get; init; } = "";
+
+    /// <summary><c>--fresh-install</c> (only with <c>--install</c>): no earlier install was there, so the app is set to start at sign-in.</summary>
+    public bool FreshInstall { get; init; }
+
+    /// <summary><c>--background</c> (the sign-in start, SPEC 3.4): the tray starts in the notification area without its window.</summary>
+    public bool Background { get; init; }
 
     /// <summary><c>--run-host</c>: the elevated helper that only runs the fixed task (SPEC 9.4), then exits.</summary>
     public bool RunHost { get; init; }
@@ -189,7 +196,7 @@ internal sealed record TrayOptions
         string? instance = null, hostExe = null, forUser = null;
         StartMode? setMode = null;
         List<string>? hostArgs = null;
-        bool toastActivated = false, unregister = false, restartHost = false, quiet = false, runHost = false;
+        bool toastActivated = false, unregister = false, restartHost = false, quiet = false, runHost = false, fresh = false, background = false;
         SetupAction? setup = null;
         string? other = null;
         for (var i = 0; i < args.Count; i++)
@@ -202,7 +209,7 @@ internal sealed record TrayOptions
                 return args[++i];
             }
 
-            if (arg is not ("--install" or "--stop-for-update" or "--uninstall" or "--instance" or "--quiet" or "--run-host")
+            if (arg is not ("--install" or "--stop-for-update" or "--uninstall" or "--instance" or "--quiet" or "--run-host" or "--fresh-install")
                 && !arg.StartsWith("--instance=", StringComparison.Ordinal))
             {
                 other ??= arg;
@@ -224,6 +231,12 @@ internal sealed record TrayOptions
                     break;
                 case "--run-host":
                     runHost = true;
+                    break;
+                case "--fresh-install":
+                    fresh = true;
+                    break;
+                case SignInStart.BackgroundArgument:
+                    background = true;
                     break;
                 case "--instance":
                     instance = Value();
@@ -268,9 +281,11 @@ internal sealed record TrayOptions
         if (setMode is not null && forUser is null)
             throw new ArgumentException("--set-start-mode needs --for-user");
         if (setup is not null && (other is not null || runHost))
-            throw new ArgumentException($"the installer's steps take only --instance and --quiet, not {other ?? "--run-host"}");
+            throw new ArgumentException($"the installer's steps take only --instance, --quiet and --install's --fresh-install, not {other ?? "--run-host"}");
         if (quiet && setup is null)
             throw new ArgumentException("--quiet goes only with --install, --stop-for-update or --uninstall");
+        if (fresh && setup != SetupAction.Install)
+            throw new ArgumentException("--fresh-install goes only with --install");
         // The elevated run-host helper: an untrusted command line, so nothing but the fixed task.
         if (runHost && other is not null)
             throw new ArgumentException($"--run-host takes only --instance, not {other}");
@@ -322,6 +337,8 @@ internal sealed record TrayOptions
             Quiet = quiet,
             SetupLogPath = Path.Combine(local, Product + suffix, "logs", "setup.log"),
             RunHost = runHost,
+            FreshInstall = fresh,
+            Background = background,
         };
     }
 }
