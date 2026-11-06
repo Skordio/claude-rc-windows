@@ -15,12 +15,14 @@ run (V) by the M0 reviewer.
 | V | non-git `NonGitC`, launched with its on-disk case | trust only, under the exact key | `m0 verify` | no prompt; reattached run C's environment and session; one Ctrl+C at 15 s |
 
 Evidence: `tests/fixtures/*` (raw bytes and rendered screens; account ids redacted
-with same-length `X` runs) and `spike/m0-logs/` (per-run event logs with timings,
-job process lists and window checks). The launcher is `spike/ConPtySpike/`.
+with same-length `X` runs) and [`docs/m0-evidence/`](m0-evidence/) (per-run event logs with timings,
+job process lists and window checks). The launcher was `spike/ConPtySpike/` and the helper scripts
+`spike/m0-scripts/`; both were deleted at the end of M1 (they are in commit `077bd37`), and the
+launcher's code lives on in `src/ClaudeRc.Host/Sessions/ConPtyProcess.cs`.
 
 ## 1. ConPTY launcher
 
-`spike/ConPtySpike` (WinExe, `net10.0-windows`, CsWin32 0.3.367 with
+`spike/ConPtySpike` (since removed; WinExe, `net10.0-windows`, CsWin32 0.3.367 with
 `allowMarshaling: false`) creates a 120×40 pseudo-console and two anonymous pipes. It
 starts the child `CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT`, assigns it to a
 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, then resumes it. It builds the
@@ -119,7 +121,7 @@ replaced by `/`**, with no other change.
   case on disk.
 - **The lookup is case-sensitive.** In run C the trust preset stored under the on-disk-case
   key was ignored, the trust prompt appeared, and accepting it created a second key in the
-  passed case. Evidence: `spike/m0-logs/claude-json-new-project-keys.json`.
+  passed case. Evidence: [`docs/m0-evidence/claude-json-new-project-keys.json`](m0-evidence/claude-json-new-project-keys.json).
 - No trailing separator. Not tested: a drive root (`C:\` is inferred to become `C:/`) and
   UNC paths. The user's file already contains `//Home/its/ITS Work/Clients`, written by an
   earlier claude session, which is consistent with `\\Home\its\…` → `//Home/its/…`.
@@ -180,7 +182,7 @@ under the exact key, a fresh git folder (run B) went straight to
 `Spawn mode: same-dir (saved for this folder; press w to change)`, and `Connected`
 appeared after 1.5 s with no prompt. A non-git folder needs only the trust key; no
 spawn prompt and no spawn key appear (run V: trust key only, under the exact key, no
-prompt; `spike/m0-logs/run-V.events.txt`).
+prompt; [`docs/m0-evidence/run-V.events.txt`](m0-evidence/run-V.events.txt)).
 
 No other prompt was seen. Two caveats:
 - This account already has the top-level keys `hasUsedRemoteControl` and
@@ -190,7 +192,8 @@ No other prompt was seen. Two caveats:
   folder's ancestor key `C:/Users/Steven` has `hasTrustDialogAccepted: false`.
 
 The SPEC §8 heuristic, run in Python against these fixtures, flags the last line of both
-prompt fixtures and of none of the ready or stopping fixtures (`spike/m0-scripts/analyze.py`).
+prompt fixtures and of none of the ready or stopping fixtures (`spike/m0-scripts/analyze.py`, in commit `077bd37`; the same cases
+are now pinned by `PromptDetectorTests` and `TerminalEmulatorTests`).
 
 Implications for M1:
 - **Positives:**
@@ -270,7 +273,7 @@ Implications for M1:
 ## 7. npm install launch
 
 `npm install --prefix <scratch>\npm @anthropic-ai/claude-code` installed 2.1.318 in 34 s
-(log: `spike/m0-logs/npm-install.txt`). npm 11.19.1 warned that the `postinstall` script
+(log: [`docs/m0-evidence/npm-install.txt`](m0-evidence/npm-install.txt)). npm 11.19.1 warned that the `postinstall` script
 is "not yet covered by allowScripts", but the script still ran.
 
 The package **no longer ships `cli.js`**:
@@ -279,7 +282,7 @@ The package **no longer ships `cli.js`**:
 - The native binary comes from the optional dependency `@anthropic-ai/claude-code-win32-x64`
   (`claude.exe`, 342 MB). `install.cjs` hard-links it over the `bin/claude.exe`
   placeholder: `fsutil hardlink list` shows both paths, and the SHA-1 hashes match.
-- `.bin\claude.cmd` (`spike/m0-logs/npm-claude.cmd.txt`) is:
+- `.bin\claude.cmd` ([`docs/m0-evidence/npm-claude.cmd.txt`](m0-evidence/npm-claude.cmd.txt)) is:
   ```bat
   "%dp0%\..\@anthropic-ai\claude-code\bin\claude.exe"   %*
   ```
@@ -308,7 +311,7 @@ The spike is a WinExe launched from PowerShell. claude rc and its children ran f
 (run A), 90 s (run C) and 30 s (run E):
 - The spike's every-2-seconds check found no visible top-level window owned by any job
   process.
-- In run E, a desktop-wide monitor (`spike/m0-logs/run-E.windows.txt`, every 500 ms, all
+- In run E, a desktop-wide monitor ([`docs/m0-evidence/run-E.windows.txt`](m0-evidence/run-E.windows.txt), every 500 ms, all
   visible top-level windows) found one new window. It was an unrelated `msedge.exe` popup
   from a process started the day before. No conhost or Windows Terminal window appeared,
   even though claude rc starts child consoles for its sessions.

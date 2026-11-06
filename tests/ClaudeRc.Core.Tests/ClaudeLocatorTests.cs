@@ -8,7 +8,7 @@ public sealed class ClaudeLocatorTests
     private const string Native = @"C:\Users\me\.local\bin\claude.exe";
     private const long RealSize = 300_000_000;
 
-    // The current npm shim, verbatim from M0 (spike/m0-logs/npm-claude.cmd.txt).
+    // The current npm shim, verbatim from M0 (docs/m0-evidence/npm-claude.cmd.txt).
     private const string NpmShim = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\"%dp0%\\..\\@anthropic-ai\\claude-code\\bin\\claude.exe\"   %*\r\n";
 
     // The same shim as `npm install -g` writes it, next to node_modules rather than inside it.
