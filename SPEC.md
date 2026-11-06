@@ -350,7 +350,7 @@ tests/
 installer/            Inno Setup script
 ```
 
-.NET 8, C#, nullable enabled. Self-contained single-file publishes for
+.NET 10 (LTS; .NET 8 support ends 2026-11-10), C#, nullable enabled. Self-contained single-file publishes for
 `win-x64` and `win-arm64`. Libraries: TaskScheduler (dahall) for tasks,
 Microsoft.Web.WebView2 for the viewer, a headless VT parser (pick in M1:
 e.g. `XtermSharp` or `Microsoft.Terminal` VT parser port) for 8 and replay.
