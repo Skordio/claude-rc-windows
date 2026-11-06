@@ -90,7 +90,8 @@ forwarded to the pseudo-console.
 - **Start mode**: At logon (default) / At startup (before logon). Switching
   re-creates the scheduled task (see 9); `startup` needs admin approval (UAC)
   and the user's Windows password once.
-- **claude.exe path**: auto-detected (see 6.1); override field + Browse.
+- **claude.exe path**: auto-detected (see 6.1); override field + Browse. The
+  override must be a full path to a `.exe` or a `claude.cmd` npm shim (6.1).
 - **Notifications**: on/off (default on).
 - Read-only info: data folder, log folder, host version, task status.
 
@@ -151,7 +152,11 @@ older ones run `cli.js` under node). If none: every ON folder shows an error row
 "claude not found: install Claude Code or set its path in Settings", and the
 host re-checks every 60 s. A settings override that does not exist is an error
 ("claude path from Settings not found: …"); the host does not silently fall
-back to the other locations. The detected path and `claude --version` show in
+back to the other locations. The override must be a `.exe` (run directly) or a
+`.cmd` (resolved like the npm shim below); anything else, such as a `.bat`, is
+refused ("claude path from Settings must be claude.exe or claude.cmd: …")
+because Windows would run it through `cmd.exe` and parse the folder name (6.3).
+The detected path and `claude --version` show in
 the status bar.
 
 Any failed start (claude not found, `.claude.json` invalid (6.2), launch error)
@@ -364,7 +369,10 @@ means N files in total, the current one included: a rolled file becomes
 
 ## 12. Security
 
-- No network listener; the named pipe accepts only the user's account.
+- No network listener; the named pipe accepts only the user's account, and
+  only on this machine: it is created with `PIPE_REJECT_REMOTE_CLIENTS`, and its
+  DACL also denies the NETWORK SID, so a client over SMB
+  (`\\machine\pipe\…`) is refused even with the user's own credentials.
 - The host only ever runs claude (6.3) with arguments it builds itself. The
   tray app sends paths, never command text.
 - Paths are normalised and must be existing directories when added.

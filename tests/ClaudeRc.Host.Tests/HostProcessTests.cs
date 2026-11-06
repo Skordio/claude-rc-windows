@@ -5,7 +5,6 @@ using System.Security.Principal;
 using ClaudeRc.Core;
 using ClaudeRc.Core.Ipc;
 using ClaudeRc.Core.Storage;
-using ClaudeRc.Host.Ipc;
 
 namespace ClaudeRc.Host.Tests;
 
@@ -113,17 +112,51 @@ public sealed class HostProcessTests
     }
 
     [Fact]
-    public void Pipe_acl_allows_only_the_user_and_system()
+    public async Task The_live_pipe_allows_only_the_user_and_system_and_denies_network_logons()
     {
+        await using var host = await TestHost.StartAsync();
         var user = WindowsIdentity.GetCurrent().User!;
-        var security = PipeServer.CreateSecurity(user);
+        using var pipe = new NamedPipeClientStream(".", host.Options.PipeName,
+            PipeAccessRights.ReadData | PipeAccessRights.WriteData | PipeAccessRights.ReadPermissions,
+            PipeOptions.None, TokenImpersonationLevel.Identification, HandleInheritability.None);
+        await pipe.ConnectAsync(10_000);
 
-        var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<PipeAccessRule>().ToList();
-        Assert.Equal(2, rules.Count);
-        Assert.All(rules, r => Assert.Equal(AccessControlType.Allow, r.AccessControlType));
-        Assert.Contains(rules, r => r.IdentityReference.Equals(user));
-        Assert.Contains(rules, r => r.IdentityReference.Equals(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)));
-        Assert.Equal(user, security.GetOwner(typeof(SecurityIdentifier)));
-        Assert.True(security.AreAccessRulesProtected);
+        // The security the pipe really has, read back from the handle.
+        var descriptor = new RawSecurityDescriptor(pipe.GetAccessControl().GetSecurityDescriptorBinaryForm(), 0);
+        Assert.Equal(user, descriptor.Owner);
+        Assert.True(descriptor.ControlFlags.HasFlag(ControlFlags.DiscretionaryAclProtected), "DACL not protected");
+        var aces = descriptor.DiscretionaryAcl!.Cast<CommonAce>().ToList();
+        Assert.Equal(3, aces.Count);
+        // The deny for network logons comes first, so it wins over the user's allow.
+        Assert.Equal(AceQualifier.AccessDenied, aces[0].AceQualifier);
+        Assert.Equal(new SecurityIdentifier(WellKnownSidType.NetworkSid, null), aces[0].SecurityIdentifier);
+        var allowed = aces.Skip(1).ToList();
+        Assert.All(allowed, a => Assert.Equal(AceQualifier.AccessAllowed, a.AceQualifier));
+        Assert.Equal(
+            new[] { new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), user }.OrderBy(s => s.Value),
+            allowed.Select(a => a.SecurityIdentifier).OrderBy(s => s.Value));
+        Assert.All(aces, a => Assert.Equal(AceFlags.None, a.AceFlags));
+    }
+
+    [ServerServiceFact]
+    public async Task A_client_over_the_network_path_is_refused()
+    {
+        await using var host = await TestHost.StartAsync();
+        // \\127.0.0.1\pipe\<name> goes through the Server service (SMB): the path a remote
+        // machine's client uses (SPEC 12: no network listener).
+        using var remote = new NamedPipeClientStream("127.0.0.1", host.Options.PipeName, PipeDirection.InOut);
+        Assert.Throws<UnauthorizedAccessException>(() => remote.Connect(10_000));
+
+        Assert.True((await host.Send(new ListRequest())).Ok);
+    }
+}
+
+/// <summary>A fact that needs the Server (LanmanServer) service, which serves <c>\\127.0.0.1\pipe\…</c>; skipped without it.</summary>
+public sealed class ServerServiceFactAttribute : FactAttribute
+{
+    public ServerServiceFactAttribute()
+    {
+        if (!NativeTestMethods.IsServiceRunning("LanmanServer"))
+            Skip = "the Server (LanmanServer) service is not running";
     }
 }

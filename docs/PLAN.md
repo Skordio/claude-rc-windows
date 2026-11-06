@@ -15,7 +15,7 @@ section 2 are hard rules.
 | P/Invoke | `Microsoft.Windows.CsWin32` source generator (ConPTY, Job Objects, `NtQueryInformationProcess`, process enumeration). |
 | Tests | xUnit + built-in `Assert`. Time via `TimeProvider`; tests use `FakeTimeProvider` (`Microsoft.Extensions.TimeProvider.Testing`). No FluentAssertions (it is a paid licence since v8). |
 | JSON | `System.Text.Json` with source-generated contexts (IPC messages, data files). |
-| IPC | `NamedPipeServerStreamAcl.Create` with a `PipeSecurity` that allows only the user's SID and SYSTEM. |
+| IPC | `CreateNamedPipeW` with `PIPE_REJECT_REMOTE_CLIENTS` and a `PipeSecurity` that allows only the user's SID and SYSTEM and denies NETWORK (M1 review: `NamedPipeServerStreamAcl.Create` cannot reject remote clients). |
 | VT emulator | Chosen in M1 (SPEC §13). Candidates: XtermSharp, a port of the Windows Terminal VT parser, or a small in-repo screen model. It must handle: CSI cursor moves, erase, SGR, scroll regions, the alternate screen, and 5,000 lines of scrollback, and serialise the screen back to VT for replay. Record the choice and the reason in `docs/m1-decisions.md`. |
 | Tray icon | `H.NotifyIcon.Wpf` (or WinForms `NotifyIcon` if that package is a problem). Folder picker: WPF `Microsoft.Win32.OpenFolderDialog`. |
 | Toasts | `Microsoft.Toolkit.Uwp.Notifications` (unpackaged app; the AUMID comes from the Start menu shortcut). |

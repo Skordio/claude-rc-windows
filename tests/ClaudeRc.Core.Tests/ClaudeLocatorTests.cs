@@ -32,6 +32,30 @@ public sealed class ClaudeLocatorTests
         Assert.Equal(ClaudeSource.Settings, r.Launch.Source);
     }
 
+    [Theory]
+    [InlineData(@"D:\tools\claude.bat")]
+    [InlineData(@"D:\tools\claude.ps1")]
+    [InlineData(@"D:\tools\claude")]
+    [InlineData(@"D:\tools\claude.com")]
+    public void Override_that_is_not_an_exe_or_a_cmd_shim_is_refused(string path)
+    {
+        // A .bat runs through cmd.exe, which would parse the folder name in --name (SPEC 6.3).
+        _fs.Add(Native, RealSize);
+        _fs.Add(path, "@echo off\r\nnode cli.js %*\r\n");
+        var r = Locator.Locate(path, pathVariable: null);
+        Assert.False(r.Found);
+        Assert.Equal($"claude path from Settings must be claude.exe or claude.cmd: {path}", r.Error);
+    }
+
+    [Fact]
+    public void Exe_override_is_accepted_whatever_its_name_and_case()
+    {
+        _fs.Add(@"D:\tools\Claude-Dev.EXE", RealSize);
+        var r = Locator.Locate(@"D:\tools\Claude-Dev.EXE", pathVariable: null);
+        Assert.True(r.Found, r.Error);
+        Assert.Equal(@"D:\tools\Claude-Dev.EXE", r.Launch!.Program);
+    }
+
     [Fact]
     public void Missing_override_is_an_error_not_a_silent_fallback()
     {

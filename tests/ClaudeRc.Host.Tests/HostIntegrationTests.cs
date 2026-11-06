@@ -394,6 +394,12 @@ public sealed class HostIntegrationTests
         var relative = await host.Send(new SettingsSetRequest(@"bin\claude.exe", true));
         Assert.False(relative.Ok);
         Assert.Equal(new AppSettings(FakeClaudeHarness.FakeClaudeExe, false), new SettingsStore(host.DataDir).Load());
+
+        // A batch file would run through cmd.exe (SPEC 6.3).
+        var batch = await host.Send(new SettingsSetRequest(Path.Combine(host.Root, "claude.bat"), true));
+        Assert.False(batch.Ok);
+        Assert.Contains("must be claude.exe or claude.cmd", batch.Error, StringComparison.Ordinal);
+        Assert.Equal(new AppSettings(FakeClaudeHarness.FakeClaudeExe, false), new SettingsStore(host.DataDir).Load());
     }
 
     [Fact]

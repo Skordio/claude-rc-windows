@@ -1,18 +1,29 @@
+using System.ComponentModel;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
+using Windows.Win32;
+using Windows.Win32.Foundation;
+using Windows.Win32.Security;
+using Windows.Win32.Storage.FileSystem;
+using Windows.Win32.System.Pipes;
 
 namespace ClaudeRc.Host.Ipc;
 
 /// <summary>
 /// The host's named pipe (SPEC 10, 12): <c>\\.\pipe\claude-rc-windows-&lt;SID&gt;[-instance]</c>, owned
-/// by the user and open only to the user and SYSTEM. Serves any number of clients at once; each
-/// one is a <see cref="ClientConnection"/>.
+/// by the user and open only to the user and SYSTEM on this machine (never to remote clients).
+/// Serves any number of clients at once; each one is a <see cref="ClientConnection"/>.
 /// </summary>
 internal sealed class PipeServer : IAsyncDisposable
 {
+    private const uint ErrorAccessDenied = 5;
+    private const uint PipeUnlimitedInstances = 255;
+
     private readonly string _pipeName;
-    private readonly PipeSecurity _security;
+    private readonly byte[] _securityDescriptor;
     private readonly Func<ClientConnection, string, bool> _onLine;
     private readonly Action<ClientConnection> _onConnected;
     private readonly Action<ClientConnection> _onClosed;
@@ -34,7 +45,7 @@ internal sealed class PipeServer : IAsyncDisposable
         Action<ClientConnection> onConnected, Action<ClientConnection> onClosed, Action<string> log)
     {
         _pipeName = pipeName;
-        _security = CreateSecurity(user);
+        _securityDescriptor = CreateSecurity(user).GetSecurityDescriptorBinaryForm();
         _onLine = onLine;
         _onConnected = onConnected;
         _onClosed = onClosed;
@@ -42,13 +53,20 @@ internal sealed class PipeServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// The pipe's security: owner = the user; access for the user and SYSTEM only, nothing inherited.
+    /// The pipe's security: owner = the user; access for the user and SYSTEM only, nothing inherited;
+    /// and none for network logons (SPEC 12: no network listener). The pipe is also created with
+    /// <c>PIPE_REJECT_REMOTE_CLIENTS</c> (see <see cref="Create"/>), which is what refuses a client over
+    /// SMB (<c>\\host\pipe\…</c>) with the user's own credentials: a loopback SMB client keeps
+    /// its interactive token, so only a real remote one carries the NETWORK SID that the deny ACE
+    /// matches. The deny is a second layer; deny ACEs are ordered first, so it wins over the allow.
     /// </summary>
     public static PipeSecurity CreateSecurity(SecurityIdentifier user)
     {
         var security = new PipeSecurity();
         security.SetOwner(user);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.NetworkSid, null),
+            PipeAccessRights.FullControl, AccessControlType.Deny));
         security.AddAccessRule(new PipeAccessRule(user, PipeAccessRights.FullControl, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
             PipeAccessRights.FullControl, AccessControlType.Allow));
@@ -59,17 +77,55 @@ internal sealed class PipeServer : IAsyncDisposable
     /// Creates the pipe and starts accepting clients. The first instance is created here, so
     /// clients can connect as soon as this returns.
     /// </summary>
-    /// <exception cref="IOException">The pipe already exists (another process holds the name).</exception>
+    /// <exception cref="IOException">The pipe cannot be created.</exception>
+    /// <exception cref="UnauthorizedAccessException">The pipe already exists (another process holds the name).</exception>
     public void Start()
     {
-        // FirstPipeInstance: fail rather than join a pipe someone else created under our name.
-        _listening = Create(PipeOptions.FirstPipeInstance);
+        // First instance: fail rather than join a pipe someone else created under our name.
+        _listening = Create(first: true);
         _acceptLoop = AcceptLoop();
     }
 
-    private NamedPipeServerStream Create(PipeOptions extra) =>
-        NamedPipeServerStreamAcl.Create(_pipeName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
-            PipeTransmissionMode.Byte, PipeOptions.Asynchronous | extra, 0, 0, _security);
+    /// <summary>
+    /// One pipe instance, made with <c>CreateNamedPipeW</c> rather than
+    /// <see cref="NamedPipeServerStreamAcl"/>, which cannot set <c>PIPE_REJECT_REMOTE_CLIENTS</c>.
+    /// </summary>
+    private unsafe NamedPipeServerStream Create(bool first)
+    {
+        var openMode = FILE_FLAGS_AND_ATTRIBUTES.PIPE_ACCESS_DUPLEX | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_OVERLAPPED;
+        if (first)
+            openMode |= FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_FIRST_PIPE_INSTANCE;
+        const NAMED_PIPE_MODE PipeMode = NAMED_PIPE_MODE.PIPE_TYPE_BYTE | NAMED_PIPE_MODE.PIPE_READMODE_BYTE |
+            NAMED_PIPE_MODE.PIPE_WAIT | NAMED_PIPE_MODE.PIPE_REJECT_REMOTE_CLIENTS;
+        HANDLE handle;
+        fixed (byte* descriptor = _securityDescriptor)
+        fixed (char* name = @"\\.\pipe\" + _pipeName)
+        {
+            var attributes = new SECURITY_ATTRIBUTES
+            {
+                nLength = (uint)sizeof(SECURITY_ATTRIBUTES),
+                lpSecurityDescriptor = descriptor,
+                bInheritHandle = false,
+            };
+            handle = PInvoke.CreateNamedPipe(name, openMode, PipeMode, PipeUnlimitedInstances, 0, 0, 0, &attributes);
+        }
+        if ((nint)handle.Value == -1) // INVALID_HANDLE_VALUE
+        {
+            var error = Marshal.GetLastPInvokeError();
+            var message = $"cannot create pipe {_pipeName}: {new Win32Exception(error).Message}";
+            throw error == ErrorAccessDenied ? new UnauthorizedAccessException(message) : new IOException(message, error);
+        }
+        var safe = new SafePipeHandle((nint)handle.Value, ownsHandle: true);
+        try
+        {
+            return new NamedPipeServerStream(PipeDirection.InOut, isAsync: true, isConnected: false, safe);
+        }
+        catch
+        {
+            safe.Dispose();
+            throw;
+        }
+    }
 
     private async Task AcceptLoop()
     {
@@ -110,7 +166,7 @@ internal sealed class PipeServer : IAsyncDisposable
     {
         try
         {
-            _listening = Create(PipeOptions.None);
+            _listening = Create(first: false);
             return true;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)

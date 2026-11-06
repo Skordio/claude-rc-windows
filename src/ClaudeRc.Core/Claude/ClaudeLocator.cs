@@ -84,6 +84,16 @@ public sealed partial class ClaudeLocator(IFileProbe files, string userProfile)
     [GeneratedRegex("\"([^\"]*)\"")]
     private static partial Regex Quoted();
 
+    /// <summary>
+    /// True when <paramref name="path"/> may be the <c>claude_path</c> setting: an <c>.exe</c>,
+    /// run directly, or a <c>.cmd</c> npm shim, resolved to the program it runs (SPEC 6.1, 6.3).
+    /// </summary>
+    public static bool IsAllowedOverride(string path) =>
+        path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The error for a <c>claude_path</c> setting that <see cref="IsAllowedOverride"/> refuses.</summary>
+    public static string OverrideKindMessage(string path) => $"claude path from Settings must be claude.exe or claude.cmd: {path}";
+
     /// <summary>Finds claude.</summary>
     /// <param name="overridePath">The <c>claude_path</c> setting, or <see langword="null"/>.</param>
     /// <param name="pathVariable">The PATH to search (the host passes the freshly refreshed user + system PATH).</param>
@@ -92,6 +102,10 @@ public sealed partial class ClaudeLocator(IFileProbe files, string userProfile)
         if (!string.IsNullOrWhiteSpace(overridePath))
         {
             var full = Path.GetFullPath(overridePath.Trim().Trim('"'));
+            // Anything but an .exe (a .bat, a script) would be run through a shell, which would
+            // parse the folder name in --name (SPEC 6.3); a .cmd is resolved to what it runs.
+            if (!IsAllowedOverride(full))
+                return Fail(OverrideKindMessage(full));
             if (!files.FileExists(full))
                 return Fail($"claude path from Settings not found: {full}");
             return full.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)

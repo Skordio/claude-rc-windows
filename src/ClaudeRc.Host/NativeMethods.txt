@@ -24,3 +24,4 @@ JOBOBJECT_BASIC_PROCESS_ID_LIST
 STARTUPINFOEXW
 TerminateProcess
 SetConsoleCtrlHandler
+CreateNamedPipe

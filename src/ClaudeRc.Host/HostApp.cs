@@ -790,6 +790,8 @@ internal sealed class HostApp : IAsyncDisposable
         var claudePath = string.IsNullOrWhiteSpace(request.ClaudePath) ? null : request.ClaudePath.Trim().Trim('"');
         if (claudePath is not null && !Path.IsPathFullyQualified(claudePath))
             return Fail(request, $"claude path must be a full path: {claudePath}");
+        if (claudePath is not null && !ClaudeLocator.IsAllowedOverride(claudePath))
+            return Fail(request, ClaudeLocator.OverrideKindMessage(claudePath));
         var settings = new AppSettings(claudePath, request.Notifications);
         try
         {
