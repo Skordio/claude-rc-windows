@@ -38,7 +38,18 @@ public sealed class WaitingDetectionTests
         session.WriteInput("y\r");
         FakeClaudeHarness.WaitUntil(() => Folder().Status != FolderStatus.Waiting, "prompt answered");
         Assert.Null(Folder().Prompt);
-        Assert.Equal("y\n", h.ReadText("input.txt"));
+        // The echo changes the screen before FakeClaude has appended the line, so wait for the file.
+        FakeClaudeHarness.WaitUntil(() =>
+        {
+            try
+            {
+                return h.ReadText("input.txt") == "y\n";
+            }
+            catch (IOException)
+            {
+                return false; // FakeClaude is writing it
+            }
+        }, "input recorded");
     }
 
     [Fact]
