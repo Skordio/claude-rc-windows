@@ -11,6 +11,13 @@ namespace ClaudeRc.Tray;
 /// added to the pipe name (so it meets the host started with the same <c>--instance</c>), to the
 /// single-instance names, and to the scheduled task folder, so a test tray never runs the real task.
 /// </summary>
+/// <remarks>
+/// The helper runs elevated once UAC is approved, so its command line is not trusted (any process
+/// of the user can start it with <c>runas</c>, and the UAC prompt shows ClaudeRc.exe): it only ever
+/// sets up the fixed task running the <c>ClaudeRcHost.exe</c> next to it, with no arguments, or for
+/// a test instance only that instance's own <c>--instance</c> and folder options
+/// (<see cref="HelperHostArgumentsError"/>). Anything else is refused.
+/// </remarks>
 internal sealed record TrayOptions
 {
     private const string Product = "claude-rc-windows";
@@ -45,8 +52,14 @@ internal sealed record TrayOptions
     /// <summary><c>--unregister-notifications</c>: remove the toast registration (for the uninstaller) and exit.</summary>
     public bool UnregisterNotifications { get; init; }
 
-    /// <summary>ClaudeRcHost.exe, which the scheduled task runs: next to ClaudeRc.exe, or <c>--host-exe</c>.</summary>
+    /// <summary>
+    /// ClaudeRcHost.exe, which the scheduled task runs: next to ClaudeRc.exe, or <c>--host-exe</c>
+    /// (not in helper mode, which always uses <see cref="AppHostExe"/>).
+    /// </summary>
     public string HostExe { get; init; } = "";
+
+    /// <summary>The ClaudeRcHost.exe next to ClaudeRc.exe: the only host the elevated helper sets up.</summary>
+    public string AppHostExe { get; init; } = "";
 
     /// <summary>
     /// The host's arguments in the task: none in production. A test instance's host gets
@@ -69,8 +82,14 @@ internal sealed record TrayOptions
     /// app. They are all explicit: an elevated process can run as another (administrator) account,
     /// whose own folders must not leak into the task.
     /// </summary>
-    public IReadOnlyList<string> HelperArguments(StartMode mode, string account, bool restartHost)
+    /// <returns>
+    /// Null when the helper would refuse this app's task: a host that is not next to ClaudeRc.exe
+    /// (a debug build's <c>--host-exe</c>), or host arguments other than a test instance's own.
+    /// </returns>
+    public IReadOnlyList<string>? HelperArguments(StartMode mode, string account, bool restartHost)
     {
+        if (!SamePath(HostExe, AppHostExe) || HelperHostArgumentsError(Instance, HostArguments) is not null)
+            return null;
         List<string> args = ["--set-start-mode", ModeArgument(mode), "--for-user", account];
         if (restartHost)
             args.Add("--restart-host");
@@ -81,6 +100,46 @@ internal sealed record TrayOptions
             args.AddRange(["--host-arg", a]);
         return args;
     }
+
+    /// <summary>The host options a test instance's task may pass (each once): its own suffix and its folders.</summary>
+    private static readonly string[] HelperHostOptions = ["--instance", "--data-dir", "--log-dir", "--claude-json"];
+
+    /// <summary>
+    /// Why the elevated helper must not register these host arguments, or null when it may: none
+    /// without <c>--instance</c>; with it, <c>--instance</c> with the same suffix and optionally
+    /// <c>--data-dir</c>, <c>--log-dir</c> and <c>--claude-json</c>, each once with a full path.
+    /// </summary>
+    internal static string? HelperHostArgumentsError(string? instance, IReadOnlyList<string> hostArguments)
+    {
+        ArgumentNullException.ThrowIfNull(hostArguments);
+        if (instance is null)
+            return hostArguments.Count == 0 ? null : "the host gets no --host-arg without --instance";
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < hostArguments.Count; i += 2)
+        {
+            var option = hostArguments[i];
+            if (!HelperHostOptions.Contains(option, StringComparer.Ordinal))
+                return $"--host-arg {option} is not one of the host's own options ({string.Join(", ", HelperHostOptions)})";
+            if (!seen.Add(option))
+                return $"--host-arg {option} is given twice";
+            if (i + 1 >= hostArguments.Count)
+                return $"--host-arg {option} needs a value";
+            var value = hostArguments[i + 1];
+            if (option == "--instance")
+            {
+                if (!string.Equals(value, instance, StringComparison.Ordinal))
+                    return $"--host-arg --instance must be this instance ({instance}): {value}";
+            }
+            else if (!Path.IsPathFullyQualified(value))
+            {
+                return $"--host-arg {option} must be a full path: {value}";
+            }
+        }
+        return seen.Contains("--instance") ? null : $"--host-arg must include --instance {instance}";
+    }
+
+    private static bool SamePath(string a, string b) =>
+        a.Length > 0 && b.Length > 0 && string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
 
     private static string ModeArgument(StartMode mode) => mode switch
     {
@@ -173,6 +232,17 @@ internal sealed record TrayOptions
                 "--log-dir", Path.Combine(local, Product + suffix, "logs"),
                 "--claude-json", Path.Combine(local, Product + suffix, "claude.json"),
             ];
+        var appHost = Path.Combine(appDir ?? AppContext.BaseDirectory, HostExeName);
+        IReadOnlyList<string> hostArguments = hostArgs ?? derived;
+        if (setMode is not null)
+        {
+            // The elevated helper: only the fixed host, only a test instance's own options.
+            if (hostExe is not null && !SamePath(hostExe, appHost))
+                throw new ArgumentException($"the start-mode helper only sets up the {HostExeName} next to it ({appHost}), not {hostExe}");
+            hostExe = appHost;
+            if (HelperHostArgumentsError(instance, hostArguments) is { } why)
+                throw new ArgumentException(why);
+        }
         return new TrayOptions
         {
             Instance = instance,
@@ -183,8 +253,9 @@ internal sealed record TrayOptions
             WebViewDataDir = Path.Combine(local, Product, "webview2" + suffix),
             ToastActivated = toastActivated,
             UnregisterNotifications = unregister,
-            HostExe = hostExe ?? Path.Combine(appDir ?? AppContext.BaseDirectory, HostExeName),
-            HostArguments = hostArgs ?? derived,
+            HostExe = hostExe ?? appHost,
+            AppHostExe = appHost,
+            HostArguments = hostArguments,
             SetStartMode = setMode,
             ForUser = forUser,
             RestartHost = restartHost,

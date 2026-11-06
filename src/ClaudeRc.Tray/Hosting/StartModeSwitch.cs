@@ -128,7 +128,7 @@ internal sealed record StartModeSetup(string TaskPath, string HostExe, IReadOnly
 /// <param name="fileExists">Whether a file exists.</param>
 /// <param name="delay">Waits (tests pass a no-op).</param>
 internal sealed class StartModeSwitcher(ITaskService tasks, IElevation elevation, StartModeSetup setup,
-    Func<StartMode, bool, IReadOnlyList<string>> helperArguments, Func<string, bool> fileExists,
+    Func<StartMode, bool, IReadOnlyList<string>?> helperArguments, Func<string, bool> fileExists,
     Func<TimeSpan, CancellationToken, Task> delay) : IStartModeSwitcher
 {
     /// <inheritdoc/>
@@ -159,7 +159,9 @@ internal sealed class StartModeSwitcher(ITaskService tasks, IElevation elevation
             }
         }
 
-        var code = await elevation.RunElevatedAsync(helperArguments(target, restartHost), cancellationToken).ConfigureAwait(false);
+        if (helperArguments(target, restartHost) is not { } arguments)
+            return new SwitchResult(SwitchOutcome.Failed, HelperRefuses(setup.HostExe));
+        var code = await elevation.RunElevatedAsync(arguments, cancellationToken).ConfigureAwait(false);
         return code switch
         {
             null or HelperExitCodes.Cancelled => new SwitchResult(SwitchOutcome.Cancelled, "Cancelled: the start mode was not changed."),
@@ -169,6 +171,10 @@ internal sealed class StartModeSwitcher(ITaskService tasks, IElevation elevation
                 $"The start mode could not be changed (the elevated helper ended with code {code}; it showed the reason)."),
         };
     }
+
+    /// <summary>The elevated helper only sets up the host next to ClaudeRc.exe (a debug build's <c>--host-exe</c> is elsewhere).</summary>
+    private static string HelperRefuses(string hostExe) =>
+        $"This needs administrator rights, and the elevated helper only sets up the ClaudeRcHost.exe next to ClaudeRc.exe, with no other arguments; this app runs {hostExe}.";
 }
 
 /// <summary>Restarting the host through its task: stop the running instance, wait for it to end, run the task.</summary>
@@ -231,9 +237,10 @@ internal static class TaskRestart
 /// <param name="prompt">The Windows credential prompt.</param>
 /// <param name="dialogs">Error messages.</param>
 /// <param name="fileExists">Whether a file exists.</param>
+/// <param name="isUserAccount">Whether <c>--for-user</c> names a user account (<see cref="WindowsAccounts.IsUser"/>).</param>
 /// <param name="delay">Waits (tests pass a no-op).</param>
 internal sealed class StartModeHelper(ITaskService tasks, ICredentialPrompt prompt, Services.IDialogs dialogs,
-    Func<string, bool> fileExists, Func<TimeSpan, CancellationToken, Task> delay)
+    Func<string, bool> fileExists, Func<string, bool> isUserAccount, Func<TimeSpan, CancellationToken, Task> delay)
 {
     private const string Title = "Start mode";
 
@@ -246,6 +253,12 @@ internal sealed class StartModeHelper(ITaskService tasks, ICredentialPrompt prom
     {
         ArgumentNullException.ThrowIfNull(setup);
         var xml = HostTaskDefinition.BuildXml(setup.Spec(mode));
+        // The command line is not trusted (TrayOptions): the task is only ever set up for a user.
+        if (!isUserAccount(setup.Account))
+        {
+            dialogs.ShowError(Title, $"The start mode was not changed: {setup.Account} is not a user account on this computer.");
+            return HelperExitCodes.InvalidArguments;
+        }
         if (!fileExists(setup.HostExe))
         {
             dialogs.ShowError(Title, TaskRestart.HostMissing(setup.HostExe));

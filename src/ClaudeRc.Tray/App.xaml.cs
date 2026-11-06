@@ -140,7 +140,7 @@ internal partial class App
         try
         {
             var setup = new StartModeSetup(options.TaskPath, options.HostExe, options.HostArguments, options.ForUser!);
-            var helper = new StartModeHelper(new WindowsTaskService(), new CredUiPrompt(), dialogs, File.Exists,
+            var helper = new StartModeHelper(new WindowsTaskService(), new CredUiPrompt(), dialogs, File.Exists, WindowsAccounts.IsUser,
                 (delay, ct) => Task.Delay(delay, ct));
             code = await helper.RunAsync(setup, mode, options.RestartHost);
         }

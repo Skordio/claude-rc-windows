@@ -244,11 +244,12 @@ public class TrayOptionsStartModeTests
     [Fact]
     public void The_helper_arguments_give_the_helper_the_same_task_host_and_arguments()
     {
-        var tray = Parse("--instance", "t1", "--host-exe", @"D:\b d\ClaudeRcHost.exe");
+        var tray = Parse("--instance", "t1");
 
         var args = tray.HelperArguments(StartMode.Startup, @"PC\Jo Smith", restartHost: true);
 
         // An elevated helper may run as another (admin) account: its own AppData must not matter.
+        Assert.NotNull(args);
         var helper = TrayOptions.Parse(args, Sid, @"C:\Users\admin\AppData\Local", @"C:\Users\admin\AppData\Roaming", AppDir);
         Assert.Equal(StartMode.Startup, helper.SetStartMode);
         Assert.Equal(@"PC\Jo Smith", helper.ForUser);
@@ -256,7 +257,87 @@ public class TrayOptionsStartModeTests
         Assert.Equal(tray.TaskPath, helper.TaskPath);
         Assert.Equal(tray.HostExe, helper.HostExe);
         Assert.Equal(tray.HostArguments, helper.HostArguments);
-        Assert.False(TrayOptions.Parse(tray.HelperArguments(StartMode.Logon, @"PC\Jo", restartHost: false), Sid, Local, Roaming, AppDir).RestartHost);
+        var logon = tray.HelperArguments(StartMode.Logon, @"PC\Jo", restartHost: false);
+        Assert.NotNull(logon);
+        Assert.False(TrayOptions.Parse(logon, Sid, Local, Roaming, AppDir).RestartHost);
+    }
+
+    // The elevated helper registers only the fixed task running the ClaudeRcHost.exe next to it,
+    // with only a test instance's own options: once UAC is approved, nothing on its command line
+    // may point the task at another program or at other arguments.
+
+    [Fact]
+    public void In_helper_mode_the_host_is_the_one_next_to_the_helper()
+    {
+        var o = Parse("--set-start-mode", "startup", "--for-user", @"PC\Jo");
+        Assert.Equal(AppDir + @"\ClaudeRcHost.exe", o.HostExe);
+        Assert.Empty(o.HostArguments);
+
+        // The tray names the same host (in any case): accepted.
+        var same = Parse("--set-start-mode", "logon", "--for-user", @"PC\Jo", "--host-exe", AppDir.ToUpperInvariant() + @"\claudercHOST.exe");
+        Assert.Equal(AppDir + @"\ClaudeRcHost.exe", same.HostExe);
+    }
+
+    [Theory]
+    [InlineData(@"C:\evil.exe")]
+    [InlineData(@"D:\build\ClaudeRcHost.exe")]
+    [InlineData(@"C:\Users\me\AppData\Local\Programs\claude-rc-windows\..\x\ClaudeRcHost.exe")]
+    public void In_helper_mode_a_foreign_host_exe_is_refused(string hostExe)
+    {
+        Assert.Throws<ArgumentException>(() => Parse("--set-start-mode", "logon", "--for-user", @"PC\Jo", "--host-exe", hostExe));
+        Assert.Throws<ArgumentException>(() => Parse("--host-exe", hostExe, "--set-start-mode", "startup", "--for-user", @"PC\Jo"));
+    }
+
+    [Fact]
+    public void In_helper_mode_a_test_instance_may_pass_its_own_folders()
+    {
+        var o = Parse("--set-start-mode", "logon", "--for-user", @"PC\Jo", "--instance", "t1",
+            "--host-arg", "--instance", "--host-arg", "t1",
+            "--host-arg", "--data-dir", "--host-arg", @"D:\tmp\a b\data",
+            "--host-arg", "--log-dir", "--host-arg", @"D:\tmp\a b\logs",
+            "--host-arg", "--claude-json", "--host-arg", @"D:\tmp\a b\claude.json");
+        Assert.Equal(
+            ["--instance", "t1", "--data-dir", @"D:\tmp\a b\data", "--log-dir", @"D:\tmp\a b\logs", "--claude-json", @"D:\tmp\a b\claude.json"],
+            o.HostArguments);
+    }
+
+    [Theory]
+    // No instance: the production host gets no arguments at all.
+    [InlineData(null, "--instance", "t1")]
+    [InlineData(null, "--data-dir", @"D:\tmp")]
+    // Anything but the host's own folder options.
+    [InlineData("t1", "--instance", "t1", "--claude", @"C:\evil.exe")]
+    [InlineData("t1", "--instance", "t1", "--pipe", "x")]
+    [InlineData("t1", "--instance", "t1", "&", "calc")]
+    // Another instance than the helper's own, or none.
+    [InlineData("t1", "--instance", "t2")]
+    [InlineData("t1", "--data-dir", @"D:\tmp")]
+    // A value missing, not a full path, or an option twice.
+    [InlineData("t1", "--instance", "t1", "--data-dir")]
+    [InlineData("t1", "--instance", "t1", "--data-dir", @"tmp\data")]
+    [InlineData("t1", "--instance", "t1", "--log-dir", @"\tmp\logs")]
+    [InlineData("t1", "--instance", "t1", "--claude-json", "--data-dir")]
+    [InlineData("t1", "--instance", "t1", "--data-dir", @"D:\a", "--data-dir", @"D:\b")]
+    [InlineData("t1", "--instance", "t1", "--instance", "t1")]
+    public void In_helper_mode_foreign_host_arguments_are_refused(string? instance, params string[] hostArgs)
+    {
+        var args = new List<string> { "--set-start-mode", "logon", "--for-user", @"PC\Jo" };
+        if (instance is not null)
+            args.AddRange(["--instance", instance]);
+        foreach (var a in hostArgs)
+            args.AddRange(["--host-arg", a]);
+        Assert.Throws<ArgumentException>(() => Parse([.. args]));
+    }
+
+    [Fact]
+    public void A_tray_whose_task_the_helper_would_refuse_gets_no_helper_arguments()
+    {
+        // A debug build's host (another folder) or other host arguments: the tray can still set up
+        // logon itself, but it does not start an elevated helper that would refuse them.
+        Assert.Null(Parse("--host-exe", @"D:\build\ClaudeRcHost.exe").HelperArguments(StartMode.Startup, @"PC\Jo", restartHost: false));
+        Assert.Null(Parse("--host-arg", "--evil").HelperArguments(StartMode.Startup, @"PC\Jo", restartHost: false));
+        Assert.NotNull(Parse("--instance", "t1", "--host-arg", "--instance", "--host-arg", "t1")
+            .HelperArguments(StartMode.Startup, @"PC\Jo", restartHost: false));
     }
 
     [Fact]

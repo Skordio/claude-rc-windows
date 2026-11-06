@@ -411,7 +411,13 @@ password fields with the account filled in; only the password is used), and
 passes the password straight to Task Scheduler's registration, which checks
 it: a wrong one (`0x8007052E`) shows the prompt again with "the password was not
 accepted"; Cancel changes nothing. The helper shows its own errors and tells the
-tray the outcome through its exit code. The host runs
+tray the outcome through its exit code. Its command line is not trusted (any
+program of the user could start it with `runas`, and UAC would show
+ClaudeRc.exe): it only ever sets up the fixed task, running the
+`ClaudeRcHost.exe` in its own folder with no arguments (a test instance: only
+its own `--instance` and folder options), for a user account (not a group, a
+service account or an unknown name); anything else is refused and changes
+nothing. The host runs
 in session 0 (no desktop); ConPTY works there, and the tray app reaches it
 over the named pipe (10). If the Windows password changes, Task Scheduler
 can't start the task: the tray app detects the task's last result
@@ -521,6 +527,9 @@ means N files in total, the current one included: a rolled file becomes
 - The Windows password for `startup` mode goes straight from the credential
   prompt to Task Scheduler. It is never written to disk, logged or sent over
   the pipe.
+- The elevated start-mode helper (9.2) registers only the fixed host task for
+  a user account; other programs, arguments or accounts on its command line
+  are refused.
 - `~/.claude.json` changes are limited to the two keys in 6.2.
 
 ## 13. Architecture

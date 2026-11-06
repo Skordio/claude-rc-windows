@@ -153,6 +153,20 @@ public class StartModeSwitcherTests
     {
         await Assert.ThrowsAsync<ArgumentException>(() => _switcher.SwitchAsync(StartMode.Unknown, restartHost: false));
     }
+
+    [Fact]
+    public async Task A_task_the_helper_would_refuse_is_not_handed_to_it()
+    {
+        // A host that is not next to ClaudeRc.exe (a debug build): no helper arguments.
+        var switcher = new StartModeSwitcher(_tasks, _elevation, Setup, (_, _) => null, _files.Contains, (_, _) => Task.CompletedTask);
+
+        var result = await switcher.SwitchAsync(StartMode.Startup, restartHost: false);
+
+        Assert.Equal(SwitchOutcome.Failed, result.Outcome);
+        Assert.Contains("next to ClaudeRc.exe", result.Message, StringComparison.Ordinal);
+        Assert.Empty(_elevation.Runs);
+        Assert.Empty(_tasks.Calls);
+    }
 }
 
 /// <summary>
@@ -168,13 +182,14 @@ public class StartModeHelperTests
     private readonly FakeCredentialPrompt _prompt = new();
     private readonly FakeDialogs _dialogs = new();
     private readonly HashSet<string> _files = new(StringComparer.OrdinalIgnoreCase) { Exe };
+    private readonly HashSet<string> _users = new(StringComparer.OrdinalIgnoreCase) { Account };
     private readonly StartModeHelper _helper;
 
     private static readonly StartModeSetup Setup = new(TaskPath, Exe, [], Account);
 
     public StartModeHelperTests()
     {
-        _helper = new StartModeHelper(_tasks, _prompt, _dialogs, _files.Contains, (_, _) => Task.CompletedTask);
+        _helper = new StartModeHelper(_tasks, _prompt, _dialogs, _files.Contains, _users.Contains, (_, _) => Task.CompletedTask);
     }
 
     [Fact]
@@ -337,6 +352,23 @@ public class StartModeHelperTests
         Assert.Contains(Exe, Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("Logon")]
+    [InlineData("Startup")]
+    public async Task An_account_that_is_not_a_user_is_refused_before_anything_changes(string mode)
+    {
+        // --for-user OTHER\nobody, a group or a service account: the helper sets up nothing.
+        _users.Clear();
+        _prompt.Answers.Enqueue("s3cret");
+
+        var code = await _helper.RunAsync(Setup, Enum.Parse<StartMode>(mode), restartHost: true);
+
+        Assert.Equal(HelperExitCodes.InvalidArguments, code);
+        Assert.Empty(_prompt.Prompts);
+        Assert.Empty(_tasks.Calls);
+        Assert.Contains(Account, Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Exit_codes_are_stable()
     {
@@ -345,5 +377,30 @@ public class StartModeHelperTests
         Assert.Equal(2, HelperExitCodes.InvalidArguments);
         Assert.Equal(4, HelperExitCodes.NotRestarted);
         Assert.Equal(1223, HelperExitCodes.Cancelled); // ERROR_CANCELLED
+    }
+}
+
+/// <summary>The helper's account check against this machine's accounts (a local lookup; nothing is changed).</summary>
+public class WindowsAccountsTests
+{
+    [Fact]
+    public void The_current_user_is_a_user()
+    {
+        using var me = System.Security.Principal.WindowsIdentity.GetCurrent();
+        Assert.True(WindowsAccounts.IsUser(me.Name));
+    }
+
+    [Theory]
+    [InlineData(@"NT AUTHORITY\SYSTEM")]
+    [InlineData(@"NT AUTHORITY\LOCAL SERVICE")]
+    [InlineData(@"BUILTIN\Administrators")]
+    [InlineData(@"BUILTIN\Users")]
+    [InlineData("Everyone")]
+    [InlineData(@"NO-SUCH-DOMAIN-7f3a\nobody")]
+    [InlineData(@"nobody-7f3a9c21e4")]
+    [InlineData("")]
+    public void Groups_service_accounts_and_unknown_names_are_not(string name)
+    {
+        Assert.False(WindowsAccounts.IsUser(name));
     }
 }
