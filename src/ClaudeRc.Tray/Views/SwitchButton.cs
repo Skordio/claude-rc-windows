@@ -2,6 +2,7 @@ using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
 using System.Windows.Controls.Primitives;
+using System.Windows.Threading;
 
 namespace ClaudeRc.Tray.Views;
 
@@ -37,7 +38,9 @@ internal sealed class SwitchButton : ToggleButton
         {
             if (!IsEnabled())
                 throw new ElementNotEnabledException();
-            owner.ToggleFromAutomation();
+            // Asynchronously, as ButtonAutomationPeer.Invoke does: the click may show a modal
+            // confirmation, and a synchronous call would block the automation client until it closes.
+            owner.Dispatcher.BeginInvoke(DispatcherPriority.Input, owner.ToggleFromAutomation);
         }
     }
 }
