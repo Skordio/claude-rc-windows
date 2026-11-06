@@ -1,0 +1,29 @@
+html, body {
+  height: 100%;
+  margin: 0;
+  background: #1e1e1e;
+  overflow: hidden;
+}
+body {
+  display: flex;
+  flex-direction: column;
+}
+#banner {
+  flex: none;
+  padding: 6px 10px;
+  font: 13px "Segoe UI", sans-serif;
+  color: #1e1e1e;
+  background: #e8c547;
+}
+#banner.error {
+  color: #ffffff;
+  background: #b3261e;
+}
+#banner[hidden] {
+  display: none;
+}
+#terminal {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 0 0 6px;
+}

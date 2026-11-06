@@ -3,13 +3,16 @@ using ClaudeRc.Core.Hosting;
 namespace ClaudeRc.Tray;
 
 /// <summary>
-/// The tray app's command line: <c>[--instance &lt;suffix&gt;]</c> (PLAN 2.2). The instance suffix is
+/// The tray app's command line: <c>[--instance &lt;suffix&gt;] [-ToastActivated] [--unregister-notifications]</c> (PLAN 2.2). The instance suffix is
 /// added to the pipe name (so it meets the host started with the same <c>--instance</c>), to the
 /// single-instance names, and to the scheduled task folder, so a test tray never runs the real task.
 /// </summary>
 internal sealed record TrayOptions
 {
     private const string Product = "claude-rc-windows";
+
+    /// <summary>What Windows adds when it starts the app for a toast click (Microsoft.Toolkit.Uwp.Notifications).</summary>
+    public const string ToastActivatedArgument = "-ToastActivated";
 
     /// <summary>The <c>--instance</c> suffix, if any.</summary>
     public string? Instance { get; init; }
@@ -26,11 +29,21 @@ internal sealed record TrayOptions
     /// <summary>The host's scheduled task (SPEC 9): <c>\claude-rc-windows[-instance]\Host</c>.</summary>
     public required string TaskPath { get; init; }
 
+    /// <summary>The WebView2 user data folder of the console viewer: <c>%LOCALAPPDATA%\claude-rc-windows\webview2[-instance]</c>.</summary>
+    public string WebViewDataDir { get; init; } = "";
+
+    /// <summary>Started by Windows because a toast was clicked while the app was not running (<c>-ToastActivated</c>).</summary>
+    public bool ToastActivated { get; init; }
+
+    /// <summary><c>--unregister-notifications</c>: remove the toast registration (for the uninstaller) and exit.</summary>
+    public bool UnregisterNotifications { get; init; }
+
     /// <summary>Parses the command line.</summary>
     /// <exception cref="ArgumentException">An unknown option or a bad instance suffix.</exception>
-    public static TrayOptions Parse(IReadOnlyList<string> args, string userSid)
+    public static TrayOptions Parse(IReadOnlyList<string> args, string userSid, string? localAppData = null)
     {
         string? instance = null;
+        bool toastActivated = false, unregister = false;
         for (var i = 0; i < args.Count; i++)
         {
             var arg = args[i];
@@ -43,6 +56,14 @@ internal sealed record TrayOptions
             else if (arg.StartsWith("--instance=", StringComparison.Ordinal))
             {
                 instance = arg["--instance=".Length..];
+            }
+            else if (arg == ToastActivatedArgument)
+            {
+                toastActivated = true;
+            }
+            else if (arg == "--unregister-notifications")
+            {
+                unregister = true;
             }
             else
             {
@@ -61,6 +82,10 @@ internal sealed record TrayOptions
             MutexName = $@"Local\{Product}-tray-{userSid}{suffix}",
             ShowEventName = $@"Local\{Product}-tray-show-{userSid}{suffix}",
             TaskPath = $@"\{Product}{suffix}\Host",
+            WebViewDataDir = Path.Combine(localAppData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Product, "webview2" + suffix),
+            ToastActivated = toastActivated,
+            UnregisterNotifications = unregister,
         };
     }
 }

@@ -1,7 +1,10 @@
+using System.Runtime.InteropServices;
 using System.Windows;
+using ClaudeRc.Core.Paths;
 using ClaudeRc.Tray.Hosting;
 using ClaudeRc.Tray.ViewModels;
 using ClaudeRc.Tray.Views;
+using Microsoft.Web.WebView2.Core;
 using Microsoft.Win32;
 
 namespace ClaudeRc.Tray.Services;
@@ -60,10 +63,16 @@ internal sealed class WpfDialogs : IDialogs
     }
 }
 
-/// <summary><see cref="IWindows"/>: one settings window at a time, one log window per folder.</summary>
-internal sealed class WpfWindows(HostConnection connection, IHostTask task, IDialogs dialogs) : IWindows
+/// <summary><see cref="IWindows"/>: one settings window at a time, one log window and one console window per folder.</summary>
+/// <param name="connection">The host connection.</param>
+/// <param name="task">The host's scheduled task.</param>
+/// <param name="dialogs">Message boxes.</param>
+/// <param name="webViewDataDir">The console viewer's WebView2 user data folder (<see cref="TrayOptions.WebViewDataDir"/>).</param>
+internal sealed class WpfWindows(HostConnection connection, IHostTask task, IDialogs dialogs, string webViewDataDir) : IWindows
 {
-    private readonly Dictionary<string, LogWindow> _logs = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, LogWindow> _logs = new(PathNormalizer.Comparer);
+    private readonly Dictionary<string, ConsoleWindow> _consoles = new(PathNormalizer.Comparer);
+    private Task<CoreWebView2Environment>? _webView;
     private SettingsWindow? _settings;
 
     /// <summary>Called after settings were saved (the status bar re-reads the task).</summary>
@@ -104,8 +113,42 @@ internal sealed class WpfWindows(HostConnection connection, IHostTask task, IDia
     }
 
     /// <inheritdoc/>
-    public void OpenConsole(string path, string name) =>
-        dialogs.ShowInfo("Show", $"The console viewer for {name} is not available in this build yet.");
+    public void OpenConsole(string path, string name)
+    {
+        if (_consoles.TryGetValue(path, out var open))
+        {
+            Activate(open);
+            return;
+        }
+        var vm = new ConsoleViewModel(connection, path, name, CopyToClipboard);
+        var window = new ConsoleWindow(vm, WebViewEnvironment);
+        _consoles[path] = window;
+        window.Closed += (_, _) => _consoles.Remove(path);
+        window.Show();
+    }
+
+    /// <summary>
+    /// One WebView2 environment for every console window, in the instance's own user data folder.
+    /// Created again after a failure (the user may have installed the runtime since).
+    /// </summary>
+    private Task<CoreWebView2Environment> WebViewEnvironment()
+    {
+        if (_webView is null || _webView.IsFaulted || _webView.IsCanceled)
+            _webView = CoreWebView2Environment.CreateAsync(browserExecutableFolder: null, userDataFolder: webViewDataDir);
+        return _webView;
+    }
+
+    private static void CopyToClipboard(string text)
+    {
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (COMException)
+        {
+            // Another program holds the clipboard; the copy is lost, as in any app.
+        }
+    }
 
     private static void Activate(Window window)
     {

@@ -11,7 +11,7 @@ section 2 are hard rules.
 | Topic | Decision |
 |---|---|
 | Runtime | **.NET 10** (LTS), not .NET 8 (out of support 2026-11-10). SPEC §13 updated. |
-| Target frameworks | `ClaudeRc.Core`: `net10.0-windows` (no WPF). Host: `net10.0-windows`, `OutputType=WinExe` (no console window). Tray: `net10.0-windows`, WPF. |
+| Target frameworks | `ClaudeRc.Core`: `net10.0-windows` (no WPF). Host: `net10.0-windows`, `OutputType=WinExe` (no console window). Tray: `net10.0-windows10.0.17763.0`, WPF (M2: the toast library needs the Windows SDK projection; 17763 = Windows 10 1809, SPEC 13's minimum; see `docs/m2-decisions.md` 1). |
 | P/Invoke | `Microsoft.Windows.CsWin32` source generator (ConPTY, Job Objects, `NtQueryInformationProcess`, process enumeration). |
 | Tests | xUnit + built-in `Assert`. Time via `TimeProvider`; tests use `FakeTimeProvider` (`Microsoft.Extensions.TimeProvider.Testing`). No FluentAssertions (it is a paid licence since v8). |
 | JSON | `System.Text.Json` with source-generated contexts (IPC messages, data files). |

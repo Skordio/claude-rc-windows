@@ -20,6 +20,27 @@ internal partial class MainWindow : Window
             Title += $" (instance {instance})";
         _tick = new DispatcherTimer(TimeSpan.FromMilliseconds(500), DispatcherPriority.Background, (_, _) => vm.Tick(), Dispatcher);
         _tick.Start();
+        _unhighlight = new DispatcherTimer(TimeSpan.FromSeconds(4), DispatcherPriority.Background, (_, _) =>
+        {
+            _unhighlight!.Stop();
+            vm.ClearHighlight();
+        }, Dispatcher);
+        _unhighlight.Stop();
+        vm.RowFocusRequested += (_, row) => BringRowIntoView(row);
+    }
+
+    private readonly DispatcherTimer _unhighlight;
+
+    // After layout: the window may have been hidden until now, so the row's container may not exist yet.
+    private void BringRowIntoView(FolderRowViewModel row)
+    {
+        _unhighlight.Stop();
+        _unhighlight.Start();
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            if (RowsList.ItemContainerGenerator.ContainerFromItem(row) is FrameworkElement container)
+                container.BringIntoView();
+        });
     }
 
     /// <summary>Set when the tray app quits, so closing really closes.</summary>

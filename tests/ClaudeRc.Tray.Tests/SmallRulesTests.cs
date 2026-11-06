@@ -136,3 +136,36 @@ public class StartHostResultTests
         Assert.Equal("host and app versions differ: restart the host", IpcCodec.VersionMismatchMessage);
     }
 }
+
+public class TrayOptionsPartBTests
+{
+    private const string Sid = "S-1-5-21-1-2-3-1001";
+    private const string Local = @"C:\Users\me\AppData\Local";
+
+    [Fact]
+    public void The_viewer_data_folder_is_under_local_app_data_and_suffixed_by_the_instance()
+    {
+        Assert.Equal(Local + @"\claude-rc-windows\webview2", TrayOptions.Parse([], Sid, Local).WebViewDataDir);
+        Assert.Equal(Local + @"\claude-rc-windows\webview2-t1", TrayOptions.Parse(["--instance", "t1"], Sid, Local).WebViewDataDir);
+    }
+
+    [Fact]
+    public void The_viewer_data_folder_defaults_to_the_users_local_app_data()
+    {
+        var expected = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "claude-rc-windows", "webview2-t1");
+        Assert.Equal(expected, TrayOptions.Parse(["--instance", "t1"], Sid).WebViewDataDir);
+    }
+
+    [Fact]
+    public void Toast_activation_and_unregistering_are_accepted()
+    {
+        var o = TrayOptions.Parse(["-ToastActivated"], Sid, Local);
+        Assert.True(o.ToastActivated);
+        Assert.False(o.UnregisterNotifications);
+
+        var u = TrayOptions.Parse(["--unregister-notifications"], Sid, Local);
+        Assert.True(u.UnregisterNotifications);
+        Assert.False(u.ToastActivated);
+        Assert.False(TrayOptions.Parse([], Sid, Local).ToastActivated);
+    }
+}

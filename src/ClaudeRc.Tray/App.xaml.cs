@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using ClaudeRc.Tray.Hosting;
+using ClaudeRc.Tray.Notifications;
 using ClaudeRc.Tray.Services;
 using ClaudeRc.Tray.ViewModels;
 using ClaudeRc.Tray.Views;
@@ -29,6 +30,8 @@ internal partial class App
     private HostConnection? _connection;
     private MainWindow? _main;
     private MainViewModel? _vm;
+    private ToolkitToastNotifier? _notifier;
+    private ToastRouter? _toasts;
     private bool _quitting;
 
     /// <inheritdoc/>
@@ -45,9 +48,17 @@ internal partial class App
         }
         catch (ArgumentException ex)
         {
-            MessageBox.Show(ex.Message + "\n\nusage: ClaudeRc.exe [--instance <suffix>]", "claude-rc-windows",
+            MessageBox.Show(ex.Message + "\n\nusage: ClaudeRc.exe [--instance <suffix>] [--unregister-notifications]", "claude-rc-windows",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown(2);
+            return;
+        }
+
+        if (options.UnregisterNotifications)
+        {
+            // For the uninstaller (M5): remove what the toast toolkit registered under HKCU, then exit.
+            ToolkitToastNotifier.Unregister();
+            Shutdown(0);
             return;
         }
 
@@ -73,7 +84,7 @@ internal partial class App
         var dialogs = new WpfDialogs();
         var task = new SchtasksHostTask(options.TaskPath);
         _connection = new HostConnection(new PipeHostConnector(options.PipeName), time);
-        var windows = new WpfWindows(_connection, task, dialogs);
+        var windows = new WpfWindows(_connection, task, dialogs, options.WebViewDataDir);
         _vm = new MainViewModel(_connection, task, dialogs, new ShellLauncher(), windows, time, FolderPaths.IsNetworkPath);
         windows.SettingsSaved += async (_, _) => await _vm.LoadTaskInfoAsync();
         _main = new MainWindow(_vm, options.Instance);
@@ -84,6 +95,10 @@ internal partial class App
 
         _showWait = ThreadPool.RegisterWaitForSingleObject(_showEvent, (_, _) =>
             Dispatcher.BeginInvoke(ShowMain), null, Timeout.Infinite, executeOnlyOnce: false);
+
+        // Toasts (SPEC 3.5). A click arrives on a COM thread, also when it started this process.
+        _notifier = new ToolkitToastNotifier(options.Instance);
+        _toasts = new ToastRouter(_connection, _notifier, path => Dispatcher.BeginInvoke(() => OpenRow(path)));
 
         _connection.Start();
         _ = _vm.LoadTaskInfoAsync();
@@ -127,6 +142,12 @@ internal partial class App
 
     private void ShowMain() => _main?.ShowAndActivate();
 
+    private void OpenRow(string path)
+    {
+        ShowMain();
+        _vm?.FocusRow(path);
+    }
+
     private async Task AddFolderFromTray()
     {
         ShowMain();
@@ -153,6 +174,8 @@ internal partial class App
     protected override void OnExit(ExitEventArgs e)
     {
         _showWait?.Unregister(null);
+        _toasts?.Dispose();
+        _notifier?.Dispose();
         _tray?.Dispose();
         _showEvent?.Dispose();
         if (_mutex is not null)

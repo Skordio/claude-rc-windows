@@ -214,6 +214,27 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
         _windows.OpenLog(row.Path, row.Name);
     }
 
+    /// <summary>A row should be scrolled into view (a toast was clicked, SPEC 3.5).</summary>
+    public event EventHandler<FolderRowViewModel>? RowFocusRequested;
+
+    /// <summary>Highlights the folder's row and asks the window to bring it into view.</summary>
+    public void FocusRow(string path)
+    {
+        var target = Rows.FirstOrDefault(r => PathNormalizer.Comparer.Equals(r.Path, path));
+        if (target is null)
+            return;
+        foreach (var row in Rows)
+            row.IsHighlighted = ReferenceEquals(row, target);
+        RowFocusRequested?.Invoke(this, target);
+    }
+
+    /// <summary>Ends the highlight of <see cref="FocusRow"/>.</summary>
+    public void ClearHighlight()
+    {
+        foreach (var row in Rows)
+            row.IsHighlighted = false;
+    }
+
     /// <summary>Moves every restart countdown on; the window calls it about once a second.</summary>
     public void Tick()
     {

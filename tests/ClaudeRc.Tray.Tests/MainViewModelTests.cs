@@ -360,4 +360,35 @@ public sealed class MainViewModelTests : IAsyncDisposable
         _vm.SettingsCommand.Execute(null);
         Assert.Equal(1, _windows.SettingsOpened);
     }
+
+    [Fact]
+    public async Task Focus_row_highlights_it_and_asks_the_window_to_show_it()
+    {
+        await Connect(TestRows.Make(@"C:\a", FolderStatus.Running), TestRows.Make(@"C:\b", FolderStatus.Failing));
+        var asked = new List<FolderRowViewModel>();
+        _vm.RowFocusRequested += (_, r) => asked.Add(r);
+
+        _vm.FocusRow(@"c:\B");
+
+        Assert.Equal([Row(@"C:\b")], asked);
+        Assert.True(Row(@"C:\b").IsHighlighted);
+        Assert.False(Row(@"C:\a").IsHighlighted);
+
+        _vm.FocusRow(@"C:\a");
+        Assert.True(Row(@"C:\a").IsHighlighted);
+        Assert.False(Row(@"C:\b").IsHighlighted);
+    }
+
+    [Fact]
+    public async Task Focus_row_of_an_unknown_folder_does_nothing()
+    {
+        await Connect(TestRows.Make(@"C:\a", FolderStatus.Running));
+        var asked = 0;
+        _vm.RowFocusRequested += (_, _) => asked++;
+
+        _vm.FocusRow(@"C:\gone");
+
+        Assert.Equal(0, asked);
+        Assert.False(Row(@"C:\a").IsHighlighted);
+    }
 }

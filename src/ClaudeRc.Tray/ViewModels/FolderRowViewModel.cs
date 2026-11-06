@@ -75,6 +75,7 @@ internal sealed class FolderRowViewModel : ObservableObject
     private Row _row;
     private DateTimeOffset _receivedAt;
     private string _statusText;
+    private bool _highlighted;
 
     /// <summary>Creates the row.</summary>
     /// <param name="row">The host's row.</param>
@@ -95,6 +96,13 @@ internal sealed class FolderRowViewModel : ObservableObject
         OpenInExplorerCommand = new RelayCommand(() => actions?.OpenInExplorer(this));
         OpenInTerminalCommand = new RelayCommand(() => actions?.OpenInTerminal(this));
         ViewLogCommand = new RelayCommand(() => actions?.ViewLog(this));
+    }
+
+    /// <summary>Highlighted after a toast click opened the main window at this row (SPEC 3.5).</summary>
+    public bool IsHighlighted
+    {
+        get => _highlighted;
+        set => SetProperty(ref _highlighted, value);
     }
 
     /// <summary>The host's row as last received.</summary>

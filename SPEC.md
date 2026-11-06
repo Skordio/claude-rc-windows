@@ -99,6 +99,21 @@ Keyboard input is sent to the session (to answer a prompt, press `w`/space
 in claude rc, etc.). Closing the viewer never affects the session. Resize is
 forwarded to the pseudo-console.
 
+- **Show** on a folder whose viewer is open brings that window to the front.
+- The page and a pinned, vendored xterm.js are embedded in `ClaudeRc.exe` and
+  served to WebView2 by the app itself; the viewer makes no network request.
+  WebView2's data lives in `%LOCALAPPDATA%\claude-rc-windows\webview2` (11).
+- While no hosted session runs (OFF, restarting, failing, missing, external,
+  host not running) a banner above the terminal says why and the last screen
+  stays. The viewer attaches by itself when a session runs again, also after
+  the host comes back. A refused attach is shown in the banner and tried
+  again on the folder's next status change.
+- Ctrl+C copies when text is selected and is sent as Ctrl+C otherwise;
+  Ctrl+V pastes (so Ctrl+V itself is not sent). A long paste goes to the host
+  in pieces of at most 32,768 characters.
+- Without the Microsoft Edge WebView2 Runtime the window says it is missing
+  and where to get it.
+
 ### 3.4 Settings
 - **Start mode**: At logon (default) / At startup (before logon). Switching
   re-creates the scheduled task (see 9); `startup` needs admin approval (UAC)
@@ -117,6 +132,17 @@ it; the host checks it again (6.1).
 Windows toast when a folder becomes `failing`, `waiting`, or `missing`
 (once per transition, not repeated while it stays there). Clicking it opens
 the main window at that row. Off via settings.
+
+The host sends the `toast` event (10) only while notifications are on; the
+tray checks the setting it read too, and shows a status for a folder only
+once until the folder's row has left that status. The toast's title names the
+status ("claude rc is failing", "Waiting for input", "Folder missing"), its
+text is the host's. A newer toast of a folder replaces its older one in the
+Action Center. The clicked row is scrolled into view and highlighted for a few
+seconds. The app is unpackaged, so the toast library registers it for toasts
+under `HKCU\Software\Classes` on first start; `ClaudeRc.exe
+--unregister-notifications` removes that registration (the uninstaller runs
+it, 14).
 
 ## 4. Folder status
 
@@ -378,6 +404,7 @@ running" and **Start host**.
 | `%APPDATA%\claude-rc-windows\settings.json` | `{"v":1,"claude_path":null,"notifications":true}` |
 | `%LOCALAPPDATA%\claude-rc-windows\logs\host.log` | Host events, rolled at 5 MB, keep 3. |
 | `%LOCALAPPDATA%\claude-rc-windows\logs\folders\<hash>.log` | Per-folder: starts, exits, exit codes, restarts, takeovers, prompt detections (not console output). Rolled at 1 MB, keep 2. |
+| `%LOCALAPPDATA%\claude-rc-windows\webview2\` | The console viewer's WebView2 user data (browser cache and state; no console output is saved by the app). |
 
 `<hash>` = first 16 hex chars (lower case) of SHA-256 of the UTF-8 normalised
 path; the first line of each folder log file is `# folder: <path>`. "Keep N"
@@ -427,7 +454,9 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
 - **Installer** (Inno Setup, per-user, no admin): installs to
   `%LOCALAPPDATA%\Programs\claude-rc-windows`, Start menu shortcut, creates
   the `logon` task, starts the host and tray app. Uninstall: turns every
-  folder OFF (stops sessions), deletes the task, removes the program; asks
+  folder OFF (stops sessions), deletes the task, runs `ClaudeRc.exe
+  --unregister-notifications` (3.5), removes the program and
+  `%LOCALAPPDATA%\claude-rc-windows\webview2`; asks
   whether to keep `%APPDATA%\claude-rc-windows`. Never touches `.claude.json`.
 - **Portable zip**: same exes; first run of the tray app offers to create the
   `logon` task.

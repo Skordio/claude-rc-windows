@@ -19,6 +19,9 @@ internal sealed class FakeHostClient : IHostClient
     /// <summary>Answers each request; the default is a fake host with <see cref="Rows"/> and <see cref="Settings"/>.</summary>
     public Func<IpcRequest, IpcResponse>? Handler { get; set; }
 
+    /// <summary>When set, answers instead of <see cref="Handler"/>, so a test can hold a request in flight.</summary>
+    public Func<IpcRequest, Task<IpcResponse>>? AsyncHandler { get; set; }
+
     public List<Row> Rows { get; set; } = [];
 
     public IpcSettings Settings { get; set; } = new(null, true);
@@ -38,9 +41,13 @@ internal sealed class FakeHostClient : IHostClient
         if (_closed.Task.IsCompleted)
             return Task.FromException<IpcResponse>(new IpcClosedException(_reason ?? "closed"));
         Requests.Enqueue(request);
+        if (AsyncHandler is { } asyncHandler)
+            return WithId(asyncHandler(request), request.Id);
         var response = (Handler ?? Default)(request);
         return Task.FromResult(response with { Id = request.Id });
     }
+
+    private static async Task<IpcResponse> WithId(Task<IpcResponse> response, int id) => (await response) with { Id = id };
 
     private IpcResponse Default(IpcRequest request) => request switch
     {
@@ -182,4 +189,51 @@ internal static class Eventually
             await Task.Delay(5);
         }
     }
+}
+
+/// <summary>The console viewer page: records what the view-model posts to it.</summary>
+internal sealed class FakeViewerPage : ClaudeRc.Tray.ViewModels.IViewerPage
+{
+    private readonly ConcurrentQueue<string> _posted = new();
+
+    public IReadOnlyList<string> Posted => _posted.ToArray();
+
+    public void Post(string json) => _posted.Enqueue(json);
+
+    /// <summary>The posted messages of one type, parsed.</summary>
+    public List<System.Text.Json.JsonElement> OfType(string type) =>
+        Posted.Select(j => System.Text.Json.JsonDocument.Parse(j).RootElement)
+            .Where(e => e.GetProperty("type").GetString() == type).ToList();
+
+    /// <summary>The bytes of every output message, in order.</summary>
+    public List<byte[]> Outputs => OfType("output").Select(e => e.GetProperty("data").GetBytesFromBase64()).ToList();
+
+    /// <summary>The last banner text posted (null = hidden), or "(none)" when no status was posted.</summary>
+    public string? LastStatus => OfType("status") is { Count: > 0 } s
+        ? s[^1].GetProperty("text").GetString()
+        : "(none)";
+}
+
+internal sealed class FakeNotifier : ClaudeRc.Tray.Notifications.IToastNotifier
+{
+    public List<ClaudeRc.Tray.Notifications.ToastRequest> Shown { get; } = [];
+
+    public event EventHandler<string>? Activated;
+
+    public void Show(ClaudeRc.Tray.Notifications.ToastRequest toast)
+    {
+        lock (Shown)
+            Shown.Add(toast);
+    }
+
+    public int Count
+    {
+        get
+        {
+            lock (Shown)
+                return Shown.Count;
+        }
+    }
+
+    public void Click(string path) => Activated?.Invoke(this, path);
 }

@@ -15,6 +15,7 @@
     <SolidColorBrush x:Key="MutedText" Color="#FF6B7280" />
     <SolidColorBrush x:Key="ErrorText" Color="#FFC0392B" />
     <SolidColorBrush x:Key="RowBorder" Color="#FFE3E5E8" />
+    <SolidColorBrush x:Key="RowHighlight" Color="#FFFFF4CC" />
 
     <Style x:Key="ToolButton" TargetType="Button">
       <Setter Property="Padding" Value="10,4" />
