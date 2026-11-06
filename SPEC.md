@@ -47,29 +47,42 @@ Unofficial; not affiliated with or endorsed by Anthropic.
 
 ### 3.1 Main window
 A single list, one row per folder:
-- **Status dot + text** (see 4): green running, yellow waiting/restarting,
-  red failing/missing, grey off, blue "running (started outside the app)".
+- **Status dot + text** (see 4): green running, yellow starting/waiting/
+  restarting, red failing/missing, grey off, blue "running (started outside
+  the app)". A `restarting` row counts down "restarting in Ns" between host
+  updates and shows the last exit code; codes outside 0-255 also show in hex
+  (NTSTATUS, e.g. `-1073741510 (0xC000013A)`).
 - **Folder name** (basename; `parent\name` if two share a basename, compared
   case-insensitively; if `parent\name` still collides, more leading folders are
   added until the names differ) and the full path below it.
-- **ON/OFF toggle.** Turning OFF a running folder asks for confirmation
-  ("stops the running claude rc session; it won't come back at logon/boot").
-- **Show**: opens the console viewer (3.3). Disabled for adopted rows.
-- **Restart**: shown when status is `failing` or `stopped-unexpectedly`
-  (also available from the row menu any time it is ON).
-- **Take over**: adopted rows only (see 7).
-- **Row menu (…)**: Open folder in Explorer, Open in Windows Terminal, View
-  log, Remove (only when OFF).
+- **ON/OFF toggle.** Turning OFF a running folder (`starting`, `running` or
+  `waiting`: a hosted session is alive) asks for confirmation ("stops the
+  running claude rc session; it won't come back at logon/boot").
+- **Show**: opens the console viewer (3.3). Enabled only while a hosted
+  session is alive (`starting`, `running`, `waiting`): disabled for adopted
+  rows, and whenever nothing runs (the host has no console to attach to then).
+- **Restart**: shown when status is `failing` or `restarting` (it stopped
+  unexpectedly, or a start failed, and waits out the delay; section 4 has no
+  separate "stopped unexpectedly" status). Also in the row menu any time the
+  folder is ON, except for an adopted row.
+- **Take over**: adopted rows only (see 7); confirms first.
+- **Row menu (…)**: Restart, Open folder in Explorer, Open in Windows Terminal
+  (`wt.exe -d <path>`; Explorer if Windows Terminal is not installed), View
+  log, Remove (only when OFF and saved; confirms first).
 - A prompt line under the row when `waiting`: the prompt text and "Show to
   answer it".
+- The row's `error` (why it cannot start, 6.1, 6.2) in red. A `failing` row
+  also shows its last console lines (5.2).
 
 Toolbar: **+ Add folder**, **Settings**. Status bar: host connected / not
-running (with **Start host** button), start mode, claude.exe version.
+running (with **Start host** button), start mode, claude.exe path and version.
+While no host answers, the list area says so and points at **Start host**.
 
 Closing the window hides it to the tray; sessions keep running. Tray menu:
 Open, Add folder, Settings, Quit tray (sessions keep running: the host is a
 separate process). There is no "stop everything" in the tray; turn folders
-OFF instead.
+OFF instead. One tray app runs per user session; starting it again shows the
+running one's window.
 
 ### 3.2 Adding a folder
 **+ Add folder** opens the native Windows "Select folder" dialog (any local
@@ -94,6 +107,11 @@ forwarded to the pseudo-console.
   override must be a full path to a `.exe` or a `claude.cmd` npm shim (6.1).
 - **Notifications**: on/off (default on).
 - Read-only info: data folder, log folder, host version, task status.
+
+The settings live in the host (`settings.get` / `settings.set`, 10), so they
+can be changed only while the host is connected; otherwise the window says
+so. The tray checks the override (full path, `.exe` or `.cmd`) before sending
+it; the host checks it again (6.1).
 
 ### 3.5 Notifications
 Windows toast when a folder becomes `failing`, `waiting`, or `missing`

@@ -1,0 +1,74 @@
+<Application x:Class="ClaudeRc.Tray.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:ClassModifier="internal"
+             ShutdownMode="OnExplicitShutdown">
+  <Application.Resources>
+    <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+
+    <!-- Status dot colours (SPEC 3.1). -->
+    <SolidColorBrush x:Key="DotGreen" Color="#FF2EAA5C" />
+    <SolidColorBrush x:Key="DotYellow" Color="#FFE0A800" />
+    <SolidColorBrush x:Key="DotRed" Color="#FFD64545" />
+    <SolidColorBrush x:Key="DotGrey" Color="#FF9AA0A6" />
+    <SolidColorBrush x:Key="DotBlue" Color="#FF3B82D6" />
+    <SolidColorBrush x:Key="MutedText" Color="#FF6B7280" />
+    <SolidColorBrush x:Key="ErrorText" Color="#FFC0392B" />
+    <SolidColorBrush x:Key="RowBorder" Color="#FFE3E5E8" />
+
+    <Style x:Key="ToolButton" TargetType="Button">
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="Margin" Value="0,0,6,0" />
+      <Setter Property="MinWidth" Value="70" />
+    </Style>
+
+    <Style x:Key="RowButton" TargetType="Button">
+      <Setter Property="Padding" Value="10,3" />
+      <Setter Property="Margin" Value="6,0,0,0" />
+      <Setter Property="MinWidth" Value="64" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!--
+      ON/OFF switch. A Button (not a ToggleButton) so a click only asks the view-model; the
+      switch shows the host's state, which changes when the host says so.
+    -->
+    <Style x:Key="SwitchButton" TargetType="Button">
+      <Setter Property="Width" Value="64" />
+      <Setter Property="Height" Value="24" />
+      <Setter Property="Margin" Value="6,0,0,0" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Grid>
+              <Border x:Name="Track" CornerRadius="12" Background="#FFC4C8CD" />
+              <TextBlock x:Name="Label" Text="OFF" Foreground="#FF374151" FontSize="11" FontWeight="SemiBold"
+                         VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,9,0" />
+              <Ellipse x:Name="Knob" Width="18" Height="18" Fill="White" HorizontalAlignment="Left" Margin="3,0,0,0" />
+            </Grid>
+            <ControlTemplate.Triggers>
+              <DataTrigger Binding="{Binding IsOn}" Value="True">
+                <Setter TargetName="Track" Property="Background" Value="#FF2EAA5C" />
+                <Setter TargetName="Label" Property="Text" Value="ON" />
+                <Setter TargetName="Label" Property="Foreground" Value="White" />
+                <Setter TargetName="Label" Property="HorizontalAlignment" Value="Left" />
+                <Setter TargetName="Label" Property="Margin" Value="10,0,0,0" />
+                <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right" />
+                <Setter TargetName="Knob" Property="Margin" Value="0,0,3,0" />
+              </DataTrigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="Track" Property="BorderBrush" Value="#FF1F6FEB" />
+                <Setter TargetName="Track" Property="BorderThickness" Value="2" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.5" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Application.Resources>
+</Application>

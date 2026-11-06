@@ -1,0 +1,75 @@
+<Window x:Class="ClaudeRc.Tray.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:ClassModifier="internal"
+        Title="Settings - claude-rc-windows" Width="620" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" Icon="/Assets/tray.ico" ShowInTaskbar="True">
+  <StackPanel Margin="16">
+    <!-- Start mode (SPEC 3.4); changed through Task Scheduler in a later version. -->
+    <TextBlock Text="Start mode" FontWeight="SemiBold" />
+    <StackPanel Margin="0,4,0,0" IsEnabled="{Binding CanChangeStartMode}">
+      <RadioButton Content="At logon (default)" IsChecked="{Binding StartModeIsLogon, Mode=OneWay}" GroupName="mode" />
+      <RadioButton Content="At startup (before logon)" IsChecked="{Binding StartModeIsStartup, Mode=OneWay}" GroupName="mode" Margin="0,2,0,0" />
+    </StackPanel>
+    <TextBlock Margin="0,2,0,0" Foreground="{StaticResource MutedText}" TextWrapping="Wrap">
+      <Run Text="Current: " /><Run Text="{Binding StartModeText, Mode=OneWay}" /><Run Text=". The start mode can't be changed from this version of the app yet." />
+    </TextBlock>
+
+    <!-- claude path -->
+    <TextBlock Text="claude.exe path" FontWeight="SemiBold" Margin="0,14,0,0" />
+    <DockPanel Margin="0,4,0,0">
+      <Button DockPanel.Dock="Right" Content="Browse…" Padding="10,2" Margin="6,0,0,0" Command="{Binding BrowseCommand}"
+              IsEnabled="{Binding CanEdit}" />
+      <TextBox Text="{Binding ClaudePathOverride, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanEdit}"
+               AutomationProperties.Name="claude.exe path" VerticalContentAlignment="Center" Padding="2" />
+    </DockPanel>
+    <TextBlock Margin="0,2,0,0" Foreground="{StaticResource MutedText}" TextWrapping="Wrap">
+      <Run Text="Leave empty to find claude automatically. A full path to claude.exe or claude.cmd. In use now: " />
+      <Run Text="{Binding DetectedClaude, Mode=OneWay}" />
+    </TextBlock>
+
+    <!-- Notifications -->
+    <CheckBox Margin="0,14,0,0" IsChecked="{Binding Notifications}" IsEnabled="{Binding CanEdit}"
+              Content="Notifications when a folder is failing, waiting for input or missing" />
+
+    <!-- Read-only info -->
+    <TextBlock Text="About this host" FontWeight="SemiBold" Margin="0,16,0,4" />
+    <Grid>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
+      </Grid.RowDefinitions>
+      <Grid.Resources>
+        <Style TargetType="TextBox">
+          <Setter Property="IsReadOnly" Value="True" />
+          <Setter Property="BorderThickness" Value="0" />
+          <Setter Property="Background" Value="Transparent" />
+          <Setter Property="Margin" Value="0,1" />
+        </Style>
+        <Style TargetType="TextBlock">
+          <Setter Property="Margin" Value="0,1,12,1" />
+          <Setter Property="Foreground" Value="{StaticResource MutedText}" />
+        </Style>
+      </Grid.Resources>
+      <TextBlock Grid.Row="0" Text="Data folder" />
+      <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding DataDir, Mode=OneWay}" />
+      <TextBlock Grid.Row="1" Text="Log folder" />
+      <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding LogDir, Mode=OneWay}" />
+      <TextBlock Grid.Row="2" Text="Host version" />
+      <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding HostVersion, Mode=OneWay}" />
+      <TextBlock Grid.Row="3" Text="Scheduled task" />
+      <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding TaskStatusText, Mode=OneWay}" />
+    </Grid>
+
+    <TextBlock Text="{Binding ValidationError}" Foreground="{StaticResource ErrorText}" TextWrapping="Wrap" Margin="0,12,0,0" />
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+      <Button Content="Save" IsDefault="True" Padding="16,3" Command="{Binding SaveCommand}" IsEnabled="{Binding CanEdit}" />
+      <!-- IsCancel closes only a ShowDialog window; this one is modeless, so Click closes it. -->
+      <Button Content="Cancel" IsCancel="True" Padding="16,3" Margin="8,0,0,0" Click="Cancel_Click" />
+    </StackPanel>
+  </StackPanel>
+</Window>
