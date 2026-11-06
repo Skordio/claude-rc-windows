@@ -169,3 +169,67 @@ public class TrayOptionsPartBTests
         Assert.False(TrayOptions.Parse([], Sid, Local).ToastActivated);
     }
 }
+
+public class ProcessRunnerTests
+{
+    [Fact]
+    public async Task A_process_that_outlives_the_timeout_is_killed()
+    {
+        // A process this test starts itself (hidden): ping waits about a second per echo.
+        var psi = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "PING.EXE"))
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var a in new[] { "-n", "60", "127.0.0.1" })
+            psi.ArgumentList.Add(a);
+        var pid = 0;
+
+        var (code, _) = await ClaudeRc.Tray.Hosting.SchtasksHostTask.RunProcessAsync(
+            psi, TimeSpan.FromMilliseconds(300), CancellationToken.None, p => pid = p.Id);
+
+        Assert.Equal(-1, code);
+        Assert.NotEqual(0, pid);
+        var deadline = Environment.TickCount64 + 5000;
+        while (IsRunning(pid))
+        {
+            if (Environment.TickCount64 > deadline)
+                Assert.Fail($"ping {pid} still running after the timeout");
+            await Task.Delay(25);
+        }
+    }
+
+    [Fact]
+    public async Task A_quick_process_returns_its_exit_code_and_output()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var a in new[] { "/d", "/c", "echo hello& exit 3" })
+            psi.ArgumentList.Add(a);
+
+        var (code, output) = await ClaudeRc.Tray.Hosting.SchtasksHostTask.RunProcessAsync(psi, TimeSpan.FromSeconds(15), CancellationToken.None);
+
+        Assert.Equal(3, code);
+        Assert.Contains("hello", output, StringComparison.Ordinal);
+    }
+
+    private static bool IsRunning(int pid)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+}

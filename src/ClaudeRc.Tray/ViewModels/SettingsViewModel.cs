@@ -11,8 +11,16 @@ namespace ClaudeRc.Tray.ViewModels;
 /// override with Browse, notifications, and the read-only facts. The settings live in the host;
 /// Save sends <c>settings.set</c>.
 /// </summary>
-internal sealed class SettingsViewModel : ObservableObject
+/// <remarks>
+/// It follows the connection while the window is open: when the host goes, the fields become
+/// read-only and the window says why; when it comes back, the settings are loaded again, unless
+/// the user has changed a field, which then keeps what they typed.
+/// </remarks>
+internal sealed class SettingsViewModel : ObservableObject, IDisposable
 {
+    /// <summary>Shown while no host is connected.</summary>
+    public const string NoHostText = HostConnection.NotRunningText + ": the settings are kept by the host, so start it to change them.";
+
     private readonly HostConnection _connection;
     private readonly IHostTask _task;
     private readonly IDialogs _dialogs;
@@ -22,8 +30,11 @@ internal sealed class SettingsViewModel : ObservableObject
     private string? _validationError;
     private HostInfo? _info;
     private HostTaskInfo? _taskInfo;
+    private bool _applying;
+    private bool _edited;
+    private bool _disposed;
 
-    /// <summary>Creates the view-model; call <see cref="LoadAsync"/> before showing it.</summary>
+    /// <summary>Creates the view-model and follows the connection; call <see cref="LoadAsync"/> before showing it.</summary>
     public SettingsViewModel(HostConnection connection, IHostTask task, IDialogs dialogs)
     {
         _connection = connection;
@@ -31,6 +42,14 @@ internal sealed class SettingsViewModel : ObservableObject
         _dialogs = dialogs;
         BrowseCommand = new RelayCommand(Browse);
         SaveCommand = new AsyncRelayCommand(SaveAsync);
+        _connection.StateChanged += OnStateChanged;
+    }
+
+    /// <summary>The window closed: stop following the connection.</summary>
+    public void Dispose()
+    {
+        _disposed = true;
+        _connection.StateChanged -= OnStateChanged;
     }
 
     /// <summary>The window closes after a successful save.</summary>
@@ -50,7 +69,10 @@ internal sealed class SettingsViewModel : ObservableObject
         set
         {
             if (SetProperty(ref _claudePathOverride, value ?? ""))
+            {
+                _edited |= !_applying;
                 ValidationError = null;
+            }
         }
     }
 
@@ -58,7 +80,11 @@ internal sealed class SettingsViewModel : ObservableObject
     public bool Notifications
     {
         get => _notifications;
-        set => SetProperty(ref _notifications, value);
+        set
+        {
+            if (SetProperty(ref _notifications, value))
+                _edited |= !_applying;
+        }
     }
 
     /// <summary>The start mode in words (from the task; unknown until M4).</summary>
@@ -112,14 +138,46 @@ internal sealed class SettingsViewModel : ObservableObject
         CanEdit = settings is not null;
         if (settings is not null)
         {
-            ClaudePathOverride = settings.ClaudePath ?? "";
-            Notifications = settings.Notifications;
+            if (!_edited)
+            {
+                _applying = true;
+                try
+                {
+                    ClaudePathOverride = settings.ClaudePath ?? "";
+                    Notifications = settings.Notifications;
+                }
+                finally
+                {
+                    _applying = false;
+                }
+            }
             ValidationError = null;
         }
         else
         {
-            ValidationError = $"{HostConnection.NotRunningText}: the settings are kept by the host, so start it to change them.";
+            ValidationError = NoHostText;
         }
+        RaiseFactsChanged();
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e)
+    {
+        if (_disposed)
+            return;
+        if (_connection.State == HostState.Connected)
+        {
+            // Loads again; fields the user has changed keep their text.
+            _ = LoadAsync();
+            return;
+        }
+        CanEdit = false;
+        ValidationError = NoHostText;
+        _info = null;
+        RaiseFactsChanged();
+    }
+
+    private void RaiseFactsChanged()
+    {
         OnPropertyChanged(nameof(StartModeText));
         OnPropertyChanged(nameof(StartModeIsLogon));
         OnPropertyChanged(nameof(StartModeIsStartup));

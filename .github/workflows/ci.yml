@@ -22,4 +22,4 @@ jobs:
         run: dotnet build --no-restore -warnaserror
 
       - name: Test
-        run: dotnet test --no-build --blame-hang-timeout 10m
+        run: dotnet test --no-build --blame-hang-timeout 10m --logger "console;verbosity=detailed"

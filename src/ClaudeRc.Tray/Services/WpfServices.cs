@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using ClaudeRc.Core.Paths;
 using ClaudeRc.Tray.Hosting;
+using ClaudeRc.Tray.Viewer;
 using ClaudeRc.Tray.ViewModels;
 using ClaudeRc.Tray.Views;
 using Microsoft.Web.WebView2.Core;
@@ -89,7 +90,11 @@ internal sealed class WpfWindows(HostConnection connection, IHostTask task, IDia
         var vm = new SettingsViewModel(connection, task, dialogs);
         var window = new SettingsWindow(vm);
         _settings = window;
-        window.Closed += (_, _) => _settings = null;
+        window.Closed += (_, _) =>
+        {
+            _settings = null;
+            vm.Dispose();
+        };
         vm.CloseRequested += (_, _) => SettingsSaved?.Invoke(this, EventArgs.Empty);
         window.Show();
         await vm.LoadAsync();
@@ -134,7 +139,8 @@ internal sealed class WpfWindows(HostConnection connection, IHostTask task, IDia
     private Task<CoreWebView2Environment> WebViewEnvironment()
     {
         if (_webView is null || _webView.IsFaulted || _webView.IsCanceled)
-            _webView = CoreWebView2Environment.CreateAsync(browserExecutableFolder: null, userDataFolder: webViewDataDir);
+            _webView = CoreWebView2Environment.CreateAsync(browserExecutableFolder: null, userDataFolder: webViewDataDir,
+                new CoreWebView2EnvironmentOptions { AdditionalBrowserArguments = ViewerContent.BrowserArguments });
         return _webView;
     }
 

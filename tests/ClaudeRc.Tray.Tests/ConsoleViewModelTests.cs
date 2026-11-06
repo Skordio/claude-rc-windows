@@ -329,6 +329,85 @@ public sealed class ConsoleViewModelTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task An_attach_answer_from_a_lost_connection_does_not_count_after_the_reconnect()
+    {
+        var client = new FakeHostClient { Rows = [TestRows.Make(P, FolderStatus.Running)] };
+        var answer = new TaskCompletionSource<IpcResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.AsyncHandler = r => r switch
+        {
+            ListRequest => Task.FromResult(new IpcResponse { Ok = true, Rows = client.Rows }),
+            SettingsGetRequest => Task.FromResult(new IpcResponse { Ok = true, Settings = client.Settings, Info = client.Info }),
+            AttachRequest => answer.Task,
+            _ => Task.FromResult(new IpcResponse { Ok = true }),
+        };
+        _connector.Enqueue(client);
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.Connected, "connected");
+        using var vm = Open();
+        vm.OnPageMessage(Ready());
+        Assert.Single(client.Sent<AttachRequest>());
+
+        // The host answered, then dropped the pipe; the answer is handled only after the reconnect.
+        client.Close();
+        await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
+        var second = new FakeHostClient { Rows = [TestRows.Make(P, FolderStatus.Running)] };
+        _connector.Enqueue(second);
+        _connection.ReconnectNow();
+        await Eventually.True(() => _connection.State == HostState.Connected, "reconnected");
+        answer.SetResult(new IpcResponse { Ok = true });
+
+        await Eventually.True(() => second.Sent<AttachRequest>().Any(), "attached on the new connection");
+        await Eventually.True(() => vm.IsAttached, "attached");
+    }
+
+    [Fact]
+    public async Task An_attach_answer_that_lands_while_the_host_is_gone_does_not_count()
+    {
+        var client = new FakeHostClient { Rows = [TestRows.Make(P, FolderStatus.Running)] };
+        var answer = new TaskCompletionSource<IpcResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.AsyncHandler = r => r switch
+        {
+            ListRequest => Task.FromResult(new IpcResponse { Ok = true, Rows = client.Rows }),
+            SettingsGetRequest => Task.FromResult(new IpcResponse { Ok = true, Settings = client.Settings, Info = client.Info }),
+            AttachRequest => answer.Task,
+            _ => Task.FromResult(new IpcResponse { Ok = true }),
+        };
+        _connector.Enqueue(client);
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.Connected, "connected");
+        using var vm = Open();
+        vm.OnPageMessage(Ready());
+
+        client.Close();
+        await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
+        answer.SetResult(new IpcResponse { Ok = true });
+        await Eventually.True(() => vm.StatusText?.Contains("Host not running", StringComparison.Ordinal) == true, "banner");
+        Assert.False(vm.IsAttached);
+
+        var second = new FakeHostClient { Rows = [TestRows.Make(P, FolderStatus.Running)] };
+        _connector.Enqueue(second);
+        _connection.ReconnectNow();
+        await Eventually.True(() => vm.IsAttached && second.Sent<AttachRequest>().Any(), "attached on the new connection");
+    }
+
+    [Fact]
+    public async Task A_send_that_fails_unexpectedly_does_not_stop_the_keys()
+    {
+        var failed = 0;
+        var client = await Connect(FolderStatus.Running, r => r is InputRequest && Interlocked.Increment(ref failed) == 1
+            ? throw new ObjectDisposedException("IpcClient")
+            : null);
+        using var vm = Open();
+        vm.OnPageMessage(Ready());
+
+        vm.OnPageMessage(Input("a"));
+        vm.OnPageMessage(Input("b"));
+
+        await Eventually.True(() => client.Sent<InputRequest>().Count() == 2, "second key sent");
+        Assert.Equal(["a", "b"], client.Sent<InputRequest>().Select(i => i.Data));
+    }
+
+    [Fact]
     public async Task Closing_detaches_and_never_touches_the_session()
     {
         var client = await Connect(FolderStatus.Running);

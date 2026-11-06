@@ -108,7 +108,7 @@ internal sealed class SchtasksHostTask(string taskPath) : IHostTask
             : StartHostResult.Failed($"Could not run the scheduled task {taskPath}: {output.Trim()}");
     }
 
-    private static async Task<(int Code, string Output)> RunSchtasks(string[] args, CancellationToken cancellationToken)
+    private static Task<(int Code, string Output)> RunSchtasks(string[] args, CancellationToken cancellationToken)
     {
         var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "schtasks.exe"))
         {
@@ -119,19 +119,59 @@ internal sealed class SchtasksHostTask(string taskPath) : IHostTask
         };
         foreach (var a in args)
             psi.ArgumentList.Add(a);
+        return RunProcessAsync(psi, Timeout, cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs a process with redirected output and returns its exit code and output, or -1 and the
+    /// error. A process still running after <paramref name="timeout"/> (or when the caller cancels)
+    /// is killed with its children, so a hung schtasks.exe is not left behind.
+    /// </summary>
+    /// <param name="psi">What to start (with both outputs redirected).</param>
+    /// <param name="timeout">How long it may run.</param>
+    /// <param name="cancellationToken">Stops waiting, and kills the process.</param>
+    /// <param name="started">Called with the process once it runs (tests).</param>
+    internal static async Task<(int Code, string Output)> RunProcessAsync(ProcessStartInfo psi, TimeSpan timeout,
+        CancellationToken cancellationToken, Action<Process>? started = null)
+    {
+        ArgumentNullException.ThrowIfNull(psi);
+        Process p;
         try
         {
-            using var p = Process.Start(psi) ?? throw new InvalidOperationException("schtasks.exe did not start");
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(Timeout);
-            var stdout = p.StandardOutput.ReadToEndAsync(timeout.Token);
-            var stderr = p.StandardError.ReadToEndAsync(timeout.Token);
-            await p.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-            return (p.ExitCode, await stdout.ConfigureAwait(false) + await stderr.ConfigureAwait(false));
+            p = Process.Start(psi) ?? throw new InvalidOperationException($"{Path.GetFileName(psi.FileName)} did not start");
         }
-        catch (Exception e) when (e is Win32Exception or InvalidOperationException or OperationCanceledException)
+        catch (Exception e) when (e is Win32Exception or InvalidOperationException)
         {
             return (-1, e.Message);
+        }
+        using (p)
+        {
+            started?.Invoke(p);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(timeout);
+            try
+            {
+                var stdout = p.StandardOutput.ReadToEndAsync(cts.Token);
+                var stderr = p.StandardError.ReadToEndAsync(cts.Token);
+                await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+                return (p.ExitCode, await stdout.ConfigureAwait(false) + await stderr.ConfigureAwait(false));
+            }
+            catch (OperationCanceledException e)
+            {
+                try
+                {
+                    p.Kill(entireProcessTree: true);
+                }
+                catch (Exception kill) when (kill is Win32Exception or InvalidOperationException or NotSupportedException)
+                {
+                    // Exited meanwhile, or cannot be killed: nothing more to do.
+                }
+                return (-1, e.Message);
+            }
+            catch (Exception e) when (e is Win32Exception or InvalidOperationException)
+            {
+                return (-1, e.Message);
+            }
         }
     }
 }

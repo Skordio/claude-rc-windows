@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using ClaudeRc.Core;
 using ClaudeRc.Core.Ipc;
@@ -230,15 +231,31 @@ internal sealed class ConsoleViewModel : IDisposable
             rows = _rows;
         }
 
-        var result = await _connection.SendAsync(new AttachRequest(Path, cols, rows));
+        // The answer counts only for the connection it was asked on: one that has ended since
+        // took its viewer with it, and a new connection has none.
+        var generation = _connection.Generation;
+        HostResult result;
+        try
+        {
+            result = await _connection.SendAsync(new AttachRequest(Path, cols, rows));
+        }
+        catch (Exception e)
+        {
+            // SendAsync does not throw; if it ever does, the viewer must not stay "attaching".
+            Trace.TraceError("claude-rc-windows: attach failed: {0}", e);
+            result = new HostResult(false, e.Message, null);
+        }
+        // Not State == Connected: a reconnect raises the rows (and so this attach) before it says Connected.
+        var current = _connection.IsCurrent(generation);
 
         bool again, detach;
         lock (_lock)
         {
             _attaching = false;
-            detach = result.Ok && _disposed;
-            _attached = result.Ok && !_disposed;
-            again = _evaluateAgain;
+            detach = result.Ok && current && _disposed;
+            _attached = result.Ok && current && !_disposed;
+            // A stale answer: evaluate again on the connection there is now.
+            again = _evaluateAgain || (result.Ok && !current);
             _evaluateAgain = false;
         }
         if (detach)
@@ -300,7 +317,15 @@ internal sealed class ConsoleViewModel : IDisposable
                 data = _pendingInput.ToString(0, take);
                 _pendingInput.Remove(0, take);
             }
-            await _connection.SendAsync(new InputRequest(Path, data));
+            try
+            {
+                await _connection.SendAsync(new InputRequest(Path, data));
+            }
+            catch (Exception e)
+            {
+                // SendAsync does not throw; if it ever does, the keys after this one still go.
+                Trace.TraceError("claude-rc-windows: input failed: {0}", e);
+            }
         }
     }
 

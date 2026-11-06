@@ -83,7 +83,14 @@ internal partial class App
         var time = TimeProvider.System;
         var dialogs = new WpfDialogs();
         var task = new SchtasksHostTask(options.TaskPath);
-        _connection = new HostConnection(new PipeHostConnector(options.PipeName), time);
+        // Between runs of host events the dispatcher handles input and rendering first.
+        _connection = new HostConnection(new PipeHostConnector(options.PipeName), time, async () =>
+        {
+            if (Dispatcher.CheckAccess())
+                await Dispatcher.Yield(DispatcherPriority.Background);
+            else
+                await Task.Yield();
+        });
         var windows = new WpfWindows(_connection, task, dialogs, options.WebViewDataDir);
         _vm = new MainViewModel(_connection, task, dialogs, new ShellLauncher(), windows, time, FolderPaths.IsNetworkPath);
         windows.SettingsSaved += async (_, _) => await _vm.LoadTaskInfoAsync();
@@ -159,15 +166,22 @@ internal partial class App
         if (_quitting)
             return;
         _quitting = true;
-        foreach (var w in Windows.OfType<Window>().ToList())
+        try
         {
-            if (w is MainWindow m)
-                m.AllowClose = true;
-            w.Close();
+            foreach (var w in Windows.OfType<Window>().ToList())
+            {
+                if (w is MainWindow m)
+                    m.AllowClose = true;
+                w.Close();
+            }
+            if (_connection is not null)
+                await _connection.DisposeAsync();
         }
-        if (_connection is not null)
-            await _connection.DisposeAsync();
-        Shutdown(0);
+        finally
+        {
+            // Whatever failed above, Quit ends the process.
+            Shutdown(0);
+        }
     }
 
     /// <inheritdoc/>

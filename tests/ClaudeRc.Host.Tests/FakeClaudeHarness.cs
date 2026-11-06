@@ -64,11 +64,26 @@ public sealed class FakeClaudeHarness : IDisposable
     }
 
     /// <summary>The record FakeClaude writes (waits for it).</summary>
+    /// <remarks>
+    /// Right after FakeClaude's File.Move, antivirus or the indexer may still hold the new file, so
+    /// a read that fails with a sharing error is tried again for up to a second.
+    /// </remarks>
     public JsonObject Record(string name = "record.json")
     {
         var path = File(name);
         WaitUntil(() => System.IO.File.Exists(path), $"{name} written");
-        return JsonNode.Parse(System.IO.File.ReadAllText(path))!.AsObject();
+        var sw = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                return JsonNode.Parse(System.IO.File.ReadAllText(path))!.AsObject();
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException && sw.ElapsedMilliseconds < 1000)
+            {
+                Thread.Sleep(25);
+            }
+        }
     }
 
     public string ReadText(string name) => System.IO.File.Exists(File(name)) ? System.IO.File.ReadAllText(File(name)) : "";

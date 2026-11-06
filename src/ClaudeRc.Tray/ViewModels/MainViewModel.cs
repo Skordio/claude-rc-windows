@@ -23,6 +23,14 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     private readonly TimeProvider _time;
     private readonly Func<string, bool> _isNetworkPath;
     private HostTaskInfo? _taskInfo;
+    private string? _pendingFocus;
+    private long _pendingFocusSince;
+
+    /// <summary>
+    /// How long <see cref="FocusRow"/> waits for a folder that is not in the list yet: a toast click
+    /// that starts the tray comes before the first rows. A cold start connects well within this.
+    /// </summary>
+    public static readonly TimeSpan PendingFocusTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>Creates the view-model and follows <paramref name="connection"/>.</summary>
     /// <param name="connection">The host connection (started by the caller).</param>
@@ -217,12 +225,20 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     /// <summary>A row should be scrolled into view (a toast was clicked, SPEC 3.5).</summary>
     public event EventHandler<FolderRowViewModel>? RowFocusRequested;
 
-    /// <summary>Highlights the folder's row and asks the window to bring it into view.</summary>
+    /// <summary>
+    /// Highlights the folder's row and asks the window to bring it into view. A folder that is not
+    /// in the list yet is focused when it appears, within <see cref="PendingFocusTimeout"/>.
+    /// </summary>
     public void FocusRow(string path)
     {
         var target = Rows.FirstOrDefault(r => PathNormalizer.Comparer.Equals(r.Path, path));
         if (target is null)
+        {
+            _pendingFocus = path;
+            _pendingFocusSince = _time.GetTimestamp();
             return;
+        }
+        _pendingFocus = null;
         foreach (var row in Rows)
             row.IsHighlighted = ReferenceEquals(row, target);
         RowFocusRequested?.Invoke(this, target);
@@ -275,10 +291,16 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
     private void SyncRows()
     {
         var incoming = _connection.Rows;
-        var existing = Rows.ToDictionary(r => r.Path, PathNormalizer.Comparer);
+        var existing = new Dictionary<string, FolderRowViewModel>(PathNormalizer.Comparer);
+        foreach (var r in Rows)
+            existing.TryAdd(r.Path, r);
         var target = new List<FolderRowViewModel>(incoming.Count);
+        var seen = new HashSet<string>(PathNormalizer.Comparer);
         foreach (var row in incoming)
         {
+            // The host never sends one folder twice; if it did, the first row wins.
+            if (!seen.Add(row.Path))
+                continue;
             if (existing.Remove(row.Path, out var vm))
                 vm.Update(row);
             else
@@ -296,5 +318,13 @@ internal sealed class MainViewModel : ObservableObject, IRowActions
                 Rows.Move(at, i);
         }
         OnPropertyChanged(nameof(ShowEmptyHint));
+
+        if (_pendingFocus is { } pending)
+        {
+            if (_time.GetElapsedTime(_pendingFocusSince) > PendingFocusTimeout)
+                _pendingFocus = null;
+            else if (Rows.Any(r => PathNormalizer.Comparer.Equals(r.Path, pending)))
+                FocusRow(pending);
+        }
     }
 }

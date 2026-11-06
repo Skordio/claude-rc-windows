@@ -102,6 +102,9 @@ forwarded to the pseudo-console.
 - **Show** on a folder whose viewer is open brings that window to the front.
 - The page and a pinned, vendored xterm.js are embedded in `ClaudeRc.exe` and
   served to WebView2 by the app itself; the viewer makes no network request.
+  WebView2's own checks are off too: SmartScreen's reputation check of the
+  page's address (`IsReputationCheckingRequired`), and the browser's
+  background traffic (`--disable-background-networking`).
   WebView2's data lives in `%LOCALAPPDATA%\claude-rc-windows\webview2` (11).
 - While no hosted session runs (OFF, restarting, failing, missing, external,
   host not running) a banner above the terminal says why and the last screen
@@ -125,8 +128,11 @@ forwarded to the pseudo-console.
 
 The settings live in the host (`settings.get` / `settings.set`, 10), so they
 can be changed only while the host is connected; otherwise the window says
-so. The tray checks the override (full path, `.exe` or `.cmd`) before sending
-it; the host checks it again (6.1).
+so. The open window follows the connection: it turns read-only with that note
+when the host goes, and loads the settings again when the host comes back
+(fields the user has already changed keep what they typed). The tray checks
+the override (full path, `.exe` or `.cmd`) before sending it; the host checks
+it again (6.1).
 
 ### 3.5 Notifications
 Windows toast when a folder becomes `failing`, `waiting`, or `missing`
@@ -139,7 +145,8 @@ once until the folder's row has left that status. The toast's title names the
 status ("claude rc is failing", "Waiting for input", "Folder missing"), its
 text is the host's. A newer toast of a folder replaces its older one in the
 Action Center. The clicked row is scrolled into view and highlighted for a few
-seconds. The app is unpackaged, so the toast library registers it for toasts
+seconds. A click that starts the tray arrives before the rows are loaded; the
+row is then focused as soon as it appears (within 10 s). The app is unpackaged, so the toast library registers it for toasts
 under `HKCU\Software\Classes` on first start; `ClaudeRc.exe
 --unregister-notifications` removes that registration (the uninstaller runs
 it, 14).

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ClaudeRc.Core.Ipc;
 
 namespace ClaudeRc.Tray.Hosting;
@@ -33,6 +34,9 @@ internal sealed record HostResult(bool Ok, string? Error, IpcResponse? Response)
 /// <remarks>
 /// Start it on the UI thread: the loop's continuations come back to the caller's
 /// <see cref="SynchronizationContext"/>, so every property changes and every event is raised there.
+/// Each subscriber is called on its own: one that throws is traced and skipped, and stops neither
+/// the loop nor the other subscribers. An unexpected error from a connection ends only that
+/// connection; the loop waits out the backoff and connects again.
 /// </remarks>
 internal sealed class HostConnection : IAsyncDisposable
 {
@@ -52,13 +56,41 @@ internal sealed class HostConnection : IAsyncDisposable
     private volatile IReadOnlyList<Row> _rows = [];
     private volatile IpcSettings? _settings;
     private volatile HostInfo? _info;
+    private readonly Func<Task> _yield;
+    private int _generation;
 
     /// <summary>Creates the connection; nothing happens until <see cref="Start"/>.</summary>
-    public HostConnection(IHostConnector connector, TimeProvider time)
+    /// <param name="connector">Opens connections to the host.</param>
+    /// <param name="time">Clock for the reconnect waits.</param>
+    /// <param name="yieldToCaller">
+    /// Lets the caller's thread do other work while many events are queued. The app passes a
+    /// background-priority dispatcher yield, so input and rendering go first. Default: <see cref="Task.Yield"/>.
+    /// </param>
+    public HostConnection(IHostConnector connector, TimeProvider time, Func<Task>? yieldToCaller = null)
     {
         _connector = connector;
         _time = time;
+        _yield = yieldToCaller ?? (async () => await Task.Yield());
     }
+
+    /// <summary>Events handled in a row before the loop yields (<see cref="YieldInterval"/> also ends a run).</summary>
+    public const int EventsPerYield = 64;
+
+    /// <summary>The longest run of events handled before the loop yields.</summary>
+    public static readonly TimeSpan YieldInterval = TimeSpan.FromMilliseconds(16);
+
+    /// <summary>
+    /// Counts the connections: it goes up each time a connection is made, before the state becomes
+    /// <see cref="HostState.Connected"/>. An answer that came on an older connection is stale.
+    /// </summary>
+    public int Generation => Volatile.Read(ref _generation);
+
+    /// <summary>
+    /// The connection of <paramref name="generation"/> is still the open one. True already while
+    /// that connection loads its rows (before <see cref="HostState.Connected"/>), false as soon as
+    /// it starts closing.
+    /// </summary>
+    public bool IsCurrent(int generation) => _client is not null && generation == Generation;
 
     /// <summary>The current state.</summary>
     public HostState State => _state;
@@ -139,6 +171,13 @@ internal sealed class HostConnection : IAsyncDisposable
         {
             return new HostResult(false, e.Message, null);
         }
+        catch (Exception e) when (e is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // The connection broke under the request (a disposed client, a broken pipe, a
+            // teardown race): for the caller that is the same as the host being gone.
+            Trace.TraceWarning("claude-rc-windows: {0} failed: {1}", request.GetType().Name, e);
+            return new HostResult(false, $"{NotRunningText} ({e.Message})", null);
+        }
     }
 
     /// <summary>Reads the settings and host facts again (after <c>settings.set</c>).</summary>
@@ -153,23 +192,34 @@ internal sealed class HostConnection : IAsyncDisposable
     {
         while (!stop.IsCancellationRequested)
         {
-            IHostClient client;
             try
             {
-                client = await _connector.ConnectAsync(stop);
-            }
-            catch (OperationCanceledException) when (stop.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception e) when (e is TimeoutException or IOException or UnauthorizedAccessException)
-            {
-                SetState(HostState.NotRunning);
-                await WaitAsync(_backoff.Next(), stop);
-                continue;
-            }
+                IHostClient client;
+                try
+                {
+                    client = await _connector.ConnectAsync(stop);
+                }
+                catch (OperationCanceledException) when (stop.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception e) when (!stop.IsCancellationRequested)
+                {
+                    if (e is not (TimeoutException or IOException or UnauthorizedAccessException))
+                        Trace.TraceError("claude-rc-windows: connecting to the host failed: {0}", e);
+                    SetState(HostState.NotRunning);
+                    await WaitAsync(_backoff.Next(), stop);
+                    continue;
+                }
 
-            await ServeAsync(client, stop);
+                await ServeAsync(client, stop);
+            }
+            catch (Exception e) when (!stop.IsCancellationRequested)
+            {
+                // Nothing above should throw; if something does, the tray still reconnects.
+                Trace.TraceError("claude-rc-windows: host connection loop: {0}", e);
+                SetState(HostState.NotRunning);
+            }
             if (!stop.IsCancellationRequested)
                 await WaitAsync(_backoff.Next(), stop);
         }
@@ -184,6 +234,7 @@ internal sealed class HostConnection : IAsyncDisposable
             // next status change replaces it (rows events always carry every row).
             var list = await client.SendAsync(new ListRequest(), stop);
             var settings = await client.SendAsync(new SettingsGetRequest(), stop);
+            Interlocked.Increment(ref _generation);
             _client = client;
             _backoff.Reset();
             lock (_gate)
@@ -192,8 +243,20 @@ internal sealed class HostConnection : IAsyncDisposable
             SetSettings(settings.Settings, settings.Info);
             SetState(HostState.Connected);
 
+            // ReadAllAsync completes at once while events are queued, so without a yield a flood
+            // of output would hold the UI thread until the queue is empty.
+            var run = 0;
+            var runStart = _time.GetTimestamp();
             await foreach (var e in client.Events.ReadAllAsync(stop))
+            {
                 Dispatch(e);
+                if (++run >= EventsPerYield || _time.GetElapsedTime(runStart) >= YieldInterval)
+                {
+                    await _yield();
+                    run = 0;
+                    runStart = _time.GetTimestamp();
+                }
+            }
         }
         catch (IpcClosedException e)
         {
@@ -202,11 +265,24 @@ internal sealed class HostConnection : IAsyncDisposable
         catch (OperationCanceledException) when (stop.IsCancellationRequested)
         {
         }
+        catch (Exception e) when (!stop.IsCancellationRequested)
+        {
+            // Unexpected: end this connection only; the loop connects again.
+            Trace.TraceError("claude-rc-windows: host connection ended by an error: {0}", e);
+            reason = e.Message;
+        }
         finally
         {
             _client = null;
             reason = client.CloseReason ?? reason;
-            await client.DisposeAsync();
+            try
+            {
+                await client.DisposeAsync();
+            }
+            catch (Exception e) when (e is IOException or ObjectDisposedException or InvalidOperationException)
+            {
+                Trace.TraceWarning("claude-rc-windows: closing the host connection: {0}", e);
+            }
             SetRows([]);
             SetSettings(null, null);
             if (!stop.IsCancellationRequested)
@@ -222,11 +298,47 @@ internal sealed class HostConnection : IAsyncDisposable
                 SetRows(rows.Rows);
                 break;
             case ToastEvent toast:
-                Toast?.Invoke(this, toast);
+                Raise(Toast, toast);
                 break;
             case OutputEvent output:
-                Output?.Invoke(this, output);
+                Raise(Output, output);
                 break;
+        }
+    }
+
+    /// <summary>Calls each subscriber on its own, so one that throws reaches neither the loop nor the others.</summary>
+    private void Raise(EventHandler? handlers)
+    {
+        if (handlers is null)
+            return;
+        foreach (var handler in handlers.GetInvocationList().Cast<EventHandler>())
+        {
+            try
+            {
+                handler(this, EventArgs.Empty);
+            }
+            catch (Exception e)
+            {
+                Trace.TraceError("claude-rc-windows: a host connection subscriber failed: {0}", e);
+            }
+        }
+    }
+
+    /// <inheritdoc cref="Raise(EventHandler?)"/>
+    private void Raise<T>(EventHandler<T>? handlers, T args)
+    {
+        if (handlers is null)
+            return;
+        foreach (var handler in handlers.GetInvocationList().Cast<EventHandler<T>>())
+        {
+            try
+            {
+                handler(this, args);
+            }
+            catch (Exception e)
+            {
+                Trace.TraceError("claude-rc-windows: a host connection subscriber failed: {0}", e);
+            }
         }
     }
 
@@ -262,7 +374,7 @@ internal sealed class HostConnection : IAsyncDisposable
         if (_state == state)
             return;
         _state = state;
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        Raise(StateChanged);
     }
 
     private void SetRows(IReadOnlyList<Row> rows)
@@ -270,14 +382,14 @@ internal sealed class HostConnection : IAsyncDisposable
         if (rows.Count == 0 && _rows.Count == 0)
             return;
         _rows = rows;
-        RowsChanged?.Invoke(this, EventArgs.Empty);
+        Raise(RowsChanged);
     }
 
     private void SetSettings(IpcSettings? settings, HostInfo? info)
     {
         _settings = settings;
         _info = info;
-        SettingsChanged?.Invoke(this, EventArgs.Empty);
+        Raise(SettingsChanged);
     }
 
     /// <summary>Stops the loop and closes the connection.</summary>
@@ -294,6 +406,11 @@ internal sealed class HostConnection : IAsyncDisposable
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (Exception e)
+            {
+                // Stopping must always finish: Quit waits for it.
+                Trace.TraceError("claude-rc-windows: host connection loop failed: {0}", e);
             }
         }
         _stop.Dispose();

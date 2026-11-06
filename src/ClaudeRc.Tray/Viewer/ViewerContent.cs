@@ -20,6 +20,14 @@ internal static class ViewerContent
     /// <summary>The page to navigate to.</summary>
     public const string StartUrl = Origin + "/index.html";
 
+    /// <summary>
+    /// Extra arguments for the WebView2 browser process (SPEC 3.3: the viewer makes no network
+    /// request). The page's own requests are answered by the app; this switch stops the browser's
+    /// background traffic (component and variations updates and the like). Its reputation check of
+    /// navigations (SmartScreen) is turned off in the window's settings.
+    /// </summary>
+    public const string BrowserArguments = "--disable-background-networking";
+
     private const string Prefix = "viewer/";
 
     private static readonly FrozenDictionary<string, string> Types = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)

@@ -111,14 +111,24 @@ internal sealed class ToastRouter : IDisposable
     // A folder that has left the status it was toasted for may be toasted for it again.
     private void OnRowsChanged(object? sender, EventArgs e)
     {
-        var rows = _connection.Rows.ToDictionary(r => r.Path, r => r.Status, PathNormalizer.Comparer);
+        var rows = _connection.Rows;
         lock (_lock)
+            ForgetLeftStatuses(_shown, rows);
+    }
+
+    /// <summary>
+    /// Removes from <paramref name="shown"/> each folder whose row is gone or in another status.
+    /// Should a folder come twice (the host never sends that), its first row counts.
+    /// </summary>
+    internal static void ForgetLeftStatuses(Dictionary<string, FolderStatus> shown, IReadOnlyList<Row> rows)
+    {
+        var now = new Dictionary<string, FolderStatus>(PathNormalizer.Comparer);
+        foreach (var row in rows)
+            now.TryAdd(row.Path, row.Status);
+        foreach (var (path, status) in shown.ToList())
         {
-            foreach (var (path, status) in _shown.ToList())
-            {
-                if (!rows.TryGetValue(path, out var now) || now != status)
-                    _shown.Remove(path);
-            }
+            if (!now.TryGetValue(path, out var current) || current != status)
+                shown.Remove(path);
         }
     }
 

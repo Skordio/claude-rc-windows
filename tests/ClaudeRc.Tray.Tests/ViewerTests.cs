@@ -57,6 +57,12 @@ public class ViewerProtocolTests
 
 public class ViewerContentTests
 {
+    [Fact]
+    public void The_browser_is_started_without_background_networking()
+    {
+        Assert.Contains("--disable-background-networking", ViewerContent.BrowserArguments.Split(' '));
+    }
+
     [Theory]
     [InlineData("/index.html", "text/html; charset=utf-8")]
     [InlineData("/viewer.js", "text/javascript; charset=utf-8")]

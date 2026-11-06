@@ -391,4 +391,63 @@ public sealed class MainViewModelTests : IAsyncDisposable
         Assert.Equal(0, asked);
         Assert.False(Row(@"C:\a").IsHighlighted);
     }
+
+    [Fact]
+    public async Task Focus_row_before_the_rows_have_loaded_focuses_it_once_they_arrive()
+    {
+        var asked = new List<FolderRowViewModel>();
+        _vm.RowFocusRequested += (_, r) => asked.Add(r);
+
+        // A toast click that started the tray: the click comes before the first list answer.
+        _vm.FocusRow(@"c:\B");
+        Assert.Empty(asked);
+
+        await Connect(TestRows.Make(@"C:\a", FolderStatus.Running), TestRows.Make(@"C:\b", FolderStatus.Failing));
+
+        await Eventually.True(() => asked.Count == 1, "focus requested");
+        Assert.Same(Row(@"C:\b"), asked[0]);
+        Assert.True(Row(@"C:\b").IsHighlighted);
+        Assert.False(Row(@"C:\a").IsHighlighted);
+    }
+
+    [Fact]
+    public async Task A_pending_focus_runs_only_once()
+    {
+        var asked = 0;
+        _vm.RowFocusRequested += (_, _) => Interlocked.Increment(ref asked);
+        _vm.FocusRow(@"C:\b");
+        var client = await Connect(TestRows.Make(@"C:\b", FolderStatus.Failing));
+        await Eventually.True(() => Volatile.Read(ref asked) == 1, "focus requested");
+
+        client.Push(new RowsEvent([TestRows.Make(@"C:\b", FolderStatus.Running)]));
+        await Eventually.True(() => Row(@"C:\b").Status == FolderStatus.Running, "updated");
+        Assert.Equal(1, Volatile.Read(ref asked));
+    }
+
+    [Fact]
+    public async Task A_pending_focus_expires()
+    {
+        var asked = 0;
+        _vm.RowFocusRequested += (_, _) => Interlocked.Increment(ref asked);
+        _vm.FocusRow(@"C:\b");
+        _time.Advance(MainViewModel.PendingFocusTimeout + TimeSpan.FromSeconds(1));
+
+        await Connect(TestRows.Make(@"C:\b", FolderStatus.Failing));
+
+        Assert.Equal(0, Volatile.Read(ref asked));
+        Assert.False(Row(@"C:\b").IsHighlighted);
+    }
+
+    [Fact]
+    public async Task Rows_whose_paths_differ_only_in_case_do_not_break_the_list()
+    {
+        var client = await Connect(TestRows.Make(@"C:\a", FolderStatus.Running));
+
+        client.Push(new RowsEvent([TestRows.Make(@"C:\a", FolderStatus.Running), TestRows.Make(@"c:\A", FolderStatus.Off, on: false)]));
+        client.Push(new RowsEvent([TestRows.Make(@"C:\a", FolderStatus.Waiting), TestRows.Make(@"C:\b", FolderStatus.Running)]));
+
+        await Eventually.True(() => _vm.Rows.Count == 2 && _vm.Rows[1].Path == @"C:\b", "later rows applied");
+        Assert.Equal(FolderStatus.Waiting, Row(@"C:\a").Status);
+        Assert.Equal(HostState.Connected, _connection.State);
+    }
 }

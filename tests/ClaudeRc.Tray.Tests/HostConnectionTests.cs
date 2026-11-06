@@ -217,6 +217,187 @@ public sealed class HostConnectionTests : IAsyncDisposable
         Assert.False(_connection.Settings?.Notifications);
         Assert.True(Volatile.Read(ref changed) >= 2);
     }
+
+    [Fact]
+    public async Task A_throwing_subscriber_reaches_neither_the_loop_nor_the_other_subscribers()
+    {
+        var client = new FakeHostClient { Rows = [TestRows.Make(@"C:\a", FolderStatus.Running)] };
+        _connector.Enqueue(client);
+        _connection.RowsChanged += (_, _) =>
+        {
+            if (_connection.Rows.Count == 2)
+                throw new ArgumentException("a subscriber's bug");
+        };
+        _connection.Toast += (_, _) => throw new InvalidOperationException("a subscriber's bug");
+        var seen = 0;
+        var toasts = 0;
+        _connection.RowsChanged += (_, _) => Interlocked.Increment(ref seen);
+        _connection.Toast += (_, _) => Interlocked.Increment(ref toasts);
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.Connected, "connected");
+
+        client.Push(new RowsEvent([TestRows.Make(@"C:\a", FolderStatus.Running), TestRows.Make(@"C:\b", FolderStatus.Off)]));
+        client.Push(new ToastEvent(@"C:\a", FolderStatus.Failing, "a: failing"));
+        client.Push(new RowsEvent([TestRows.Make(@"C:\c", FolderStatus.Running)]));
+
+        await Eventually.True(() => _connection.Rows.Count == 1 && _connection.Rows[0].Path == @"C:\c", "later events handled");
+        Assert.True(Volatile.Read(ref seen) >= 3);
+        Assert.Equal(1, Volatile.Read(ref toasts));
+        Assert.Equal(HostState.Connected, _connection.State);
+        Assert.False(client.Disposed);
+    }
+
+    [Fact]
+    public async Task An_unexpected_error_ends_only_that_connection_and_the_loop_goes_on()
+    {
+        var broken = new FakeHostClient { Handler = _ => throw new InvalidOperationException("unexpected") };
+        _connector.Enqueue(broken);
+        _connection.Start();
+        await Eventually.True(() => broken.Disposed, "broken connection closed");
+        await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
+
+        _connector.Enqueue(new FakeHostClient());
+        await AdvanceUntilAttempts(2);
+        await Eventually.True(() => _connection.State == HostState.Connected, "connected on the next attempt");
+    }
+
+    [Fact]
+    public async Task An_unexpected_connect_error_is_retried()
+    {
+        var connector = new ThrowingOnceConnector(new InvalidOperationException("unexpected"), _connector);
+        await using var connection = new HostConnection(connector, _time);
+        _connector.Enqueue(new FakeHostClient());
+        connection.Start();
+        await Eventually.True(() => connector.Attempts >= 1, "first attempt");
+
+        var deadline = Environment.TickCount64 + 5000;
+        while (connection.State != HostState.Connected)
+        {
+            if (Environment.TickCount64 > deadline)
+                Assert.Fail("not connected after the failed attempt");
+            _time.Advance(TimeSpan.FromMilliseconds(250));
+            await Task.Delay(5);
+        }
+    }
+
+    [Theory]
+    [InlineData("disposed")]
+    [InlineData("io")]
+    [InlineData("canceled")]
+    [InlineData("other")]
+    public async Task Send_never_throws_when_the_connection_breaks(string kind)
+    {
+        var client = new FakeHostClient();
+        client.Handler = r => r switch
+        {
+            ListRequest => new IpcResponse { Ok = true, Rows = [] },
+            SettingsGetRequest => new IpcResponse { Ok = true, Settings = client.Settings, Info = client.Info },
+            _ => throw kind switch
+            {
+                "disposed" => new ObjectDisposedException("IpcClient"),
+                "io" => new IOException("pipe is broken"),
+                "canceled" => new OperationCanceledException(),
+                _ => new InvalidOperationException("odd"),
+            },
+        };
+        _connector.Enqueue(client);
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.Connected, "connected");
+
+        var result = await _connection.SendAsync(new InputRequest(@"C:\a", "x"));
+
+        Assert.False(result.Ok);
+        Assert.False(string.IsNullOrEmpty(result.Error));
+    }
+
+    [Fact]
+    public async Task Send_cancelled_by_the_caller_still_throws()
+    {
+        var client = new FakeHostClient();
+        client.AsyncHandler = async r => r switch
+        {
+            ListRequest => new IpcResponse { Ok = true, Rows = [] },
+            SettingsGetRequest => new IpcResponse { Ok = true, Settings = client.Settings, Info = client.Info },
+            _ => await Task.FromCanceled<IpcResponse>(new CancellationToken(true)),
+        };
+        _connector.Enqueue(client);
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.Connected, "connected");
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _connection.SendAsync(new InputRequest(@"C:\a", "x"), cts.Token));
+    }
+
+    [Fact]
+    public async Task Each_connection_has_a_new_generation()
+    {
+        var first = new FakeHostClient();
+        _connector.Enqueue(first);
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.Connected, "connected");
+        var g1 = _connection.Generation;
+        Assert.True(_connection.IsCurrent(g1));
+
+        first.Close();
+        await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
+        Assert.Equal(g1, _connection.Generation);
+        Assert.False(_connection.IsCurrent(g1));
+
+        _connector.Enqueue(new FakeHostClient());
+        _connection.ReconnectNow();
+        await Eventually.True(() => _connection.State == HostState.Connected, "reconnected");
+        Assert.True(_connection.Generation > g1);
+        Assert.False(_connection.IsCurrent(g1));
+        Assert.True(_connection.IsCurrent(_connection.Generation));
+    }
+
+    [Fact]
+    public async Task A_flood_of_events_yields_to_the_ui_now_and_then()
+    {
+        var yields = 0;
+        await using var connection = new HostConnection(_connector, _time, () =>
+        {
+            Interlocked.Increment(ref yields);
+            return Task.CompletedTask;
+        });
+        var client = new FakeHostClient();
+        _connector.Enqueue(client);
+        var outputs = 0;
+        connection.Output += (_, _) => Interlocked.Increment(ref outputs);
+        connection.Start();
+        await Eventually.True(() => connection.State == HostState.Connected, "connected");
+
+        for (var i = 0; i < 1000; i++)
+            client.Push(new OutputEvent(@"C:\a", [1, 2, 3]));
+
+        await Eventually.True(() => Volatile.Read(ref outputs) == 1000, "all events handled");
+        Assert.True(Volatile.Read(ref yields) >= 1000 / HostConnection.EventsPerYield - 1,
+            $"only {Volatile.Read(ref yields)} yields for 1000 events");
+    }
+
+    [Fact]
+    public async Task Dispose_finishes_even_after_errors()
+    {
+        var client = new FakeHostClient { Rows = [TestRows.Make(@"C:\a", FolderStatus.Running)] };
+        _connector.Enqueue(client);
+        _connection.StateChanged += (_, _) => throw new InvalidOperationException("a subscriber's bug");
+        _connection.Start();
+        await Eventually.True(() => _connection.Rows.Count == 1, "connected");
+
+        await _connection.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>Throws once, then hands over to <paramref name="next"/>.</summary>
+    private sealed class ThrowingOnceConnector(Exception error, IHostConnector next) : IHostConnector
+    {
+        private int _attempts;
+
+        public int Attempts => Volatile.Read(ref _attempts);
+
+        public Task<IHostClient> ConnectAsync(CancellationToken cancellationToken) =>
+            Interlocked.Increment(ref _attempts) == 1 ? Task.FromException<IHostClient>(error) : next.ConnectAsync(cancellationToken);
+    }
 }
 
 public class ReconnectBackoffTests

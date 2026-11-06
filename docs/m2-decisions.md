@@ -334,3 +334,51 @@ step must not create; the Drive step checks them. The page script was checked he
 against stubbed `Terminal` and DOM objects (scratch only): `ready` is posted, output is written as
 bytes, the banner shows and hides, input and resize are posted, and Ctrl+C and Ctrl+V behave as
 described.
+
+## 15. Review fixes
+
+- **The connection loop cannot die.** `HostConnection` calls each subscriber of each event on its
+  own (`Raise`): one that throws is traced (`Trace.TraceError`) and skipped, and neither the loop
+  nor the other subscribers notice. An unexpected error from a connection ends only that
+  connection, and an unexpected error from the connector is retried like "not running"; a
+  catch-all around each round keeps the loop going in any case. `SendAsync` now returns a failed
+  `HostResult` for any error (a disposed client, a broken pipe, an odd exception), except an
+  `OperationCanceledException` from the caller's own token. `DisposeAsync` never throws, and Quit
+  calls `Shutdown(0)` in a `finally`. The console viewer's attach and input sends also catch, so
+  their in-flight flags are always reset.
+- **Paths that differ only in case.** The host never sends one folder twice, but if it did, the
+  main window and the toast router would have thrown (`ToDictionary` with the case-insensitive
+  comparer). Both now take the first row of a folder and skip the rest.
+- **Stale attach answers.** `HostConnection.Generation` goes up for each connection, and
+  `IsCurrent(generation)` says whether that connection is still open (true while it loads its
+  rows, false once it starts closing). The viewer counts an attach answer only if its connection
+  is still current; otherwise it evaluates again on the connection there is now. The review
+  suggested also requiring `State == Connected`, but a reconnect raises the rows, and so the
+  viewer's attach, before it says Connected: with that check the attach looked stale every time
+  and was retried forever (a stack overflow in the tests).
+- **The UI thread yields during a flood of events.** After 64 events, or 16 ms of handling, the
+  loop awaits a yield. The app passes `Dispatcher.Yield(DispatcherPriority.Background)`, so input
+  and rendering go first. Not done: a bounded channel in Core's `IpcClient`, which would carry the
+  backpressure to the host's per-client byte cap. The read loop also reads the answers to
+  requests, so blocking it on a full event queue needs care, and claude rc's output is small.
+- **Toast click at a cold start.** `FocusRow` for a folder that is not in the list yet keeps it as
+  pending for 10 s (`PendingFocusTimeout`); the next rows that contain it focus it, once.
+- **The settings window follows the connection.** It subscribes to `StateChanged` and
+  unsubscribes when the window closes (`SettingsViewModel.Dispose`). The host going makes it
+  read-only with the note; the host coming back loads it again. A field the user has changed
+  keeps its text across that reload.
+- **WebView2 network.** `IsReputationCheckingRequired = false` (SmartScreen would send the page's
+  URL to Microsoft), and the environment is created with `--disable-background-networking`. Not
+  checked here, as it needs a visible viewer: a network trace (pktmon, or Resource Monitor
+  filtered to `msedgewebview2.exe`) while a viewer opens should show no outbound connection and no
+  DNS lookup for `viewer.claude-rc.example`.
+- **schtasks.exe timeout.** A process still running at the 15 s timeout (or when the caller
+  cancels) is killed with its children (`SchtasksHostTask.RunProcessAsync`).
+- **Flaky Host test.** `FakeClaudeHarness.Record()` retries the read for up to a second on a
+  sharing error (antivirus or the indexer holding the file just after FakeClaude's `File.Move`).
+  CI runs the tests with `--logger "console;verbosity=detailed"`, so the next failure prints its
+  message.
+
+Tests: 26 more in the tray tests (251), all seen failing before the change except the
+"expires" and "after dispose" cases, which pass trivially without it, and the
+`BrowserArguments` constant check.

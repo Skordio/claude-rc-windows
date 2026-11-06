@@ -136,4 +136,68 @@ public sealed class SettingsViewModelTests : IAsyncDisposable
         Assert.Contains("Host not running", vm.ValidationError, StringComparison.Ordinal);
         Assert.False(await vm.SaveAsync());
     }
+
+    [Fact]
+    public async Task Opened_without_a_host_it_loads_once_the_host_connects()
+    {
+        _connection.Start();
+        await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
+        using var vm = new SettingsViewModel(_connection, _task, _dialogs);
+        await vm.LoadAsync();
+        Assert.False(vm.CanEdit);
+
+        _connector.Enqueue(new FakeHostClient { Settings = new IpcSettings(@"C:\tools\claude.exe", false) });
+        _connection.ReconnectNow();
+
+        await Eventually.True(() => vm.CanEdit, "editable after the host connected");
+        Assert.Equal(@"C:\tools\claude.exe", vm.ClaudePathOverride);
+        Assert.False(vm.Notifications);
+        Assert.Null(vm.ValidationError);
+        Assert.Equal("1.2.3", vm.HostVersion);
+    }
+
+    [Fact]
+    public async Task When_the_host_goes_the_window_becomes_read_only_and_says_so()
+    {
+        var (client, vm) = await Open();
+        using var owned = vm;
+        Assert.True(vm.CanEdit);
+
+        client.Close();
+
+        await Eventually.True(() => !vm.CanEdit, "read-only");
+        Assert.Contains("Host not running", vm.ValidationError, StringComparison.Ordinal);
+        Assert.False(await vm.SaveAsync());
+    }
+
+    [Fact]
+    public async Task A_reconnect_keeps_what_the_user_typed()
+    {
+        var (client, vm) = await Open(new IpcSettings(@"C:\tools\claude.exe", true));
+        using var owned = vm;
+        vm.ClaudePathOverride = @"C:\typed\claude.exe";
+        vm.Notifications = false;
+
+        client.Close();
+        await Eventually.True(() => !vm.CanEdit, "read-only");
+        _connector.Enqueue(new FakeHostClient { Settings = new IpcSettings(@"C:\tools\claude.exe", true) });
+        _connection.ReconnectNow();
+
+        await Eventually.True(() => vm.CanEdit, "editable again");
+        Assert.Equal(@"C:\typed\claude.exe", vm.ClaudePathOverride);
+        Assert.False(vm.Notifications);
+        Assert.Null(vm.ValidationError);
+    }
+
+    [Fact]
+    public async Task After_dispose_the_connection_is_not_followed()
+    {
+        var (client, vm) = await Open();
+        vm.Dispose();
+
+        client.Close();
+        await Eventually.True(() => _connection.State == HostState.NotRunning, "not running");
+
+        Assert.True(vm.CanEdit);
+    }
 }

@@ -68,6 +68,16 @@ internal partial class ConsoleWindow : Window
         settings.IsGeneralAutofillEnabled = false;
         settings.IsBuiltInErrorPageEnabled = false;
         settings.IsWebMessageEnabled = true;
+        try
+        {
+            // SmartScreen would send the page's URL to Microsoft's reputation service (SPEC 3.3:
+            // the viewer makes no network request).
+            settings.IsReputationCheckingRequired = false;
+        }
+        catch (Exception ex) when (ex is NotImplementedException or InvalidCastException or COMException)
+        {
+            // A runtime older than the setting; --disable-background-networking still applies.
+        }
 
         core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
         core.WebResourceRequested += OnWebResourceRequested;

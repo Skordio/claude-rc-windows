@@ -91,6 +91,18 @@ public sealed class ToastRouterTests : IAsyncDisposable
     }
 
     [Fact]
+    public void Rows_whose_paths_differ_only_in_case_are_read_by_the_first_one()
+    {
+        var shown = new Dictionary<string, FolderStatus>(ClaudeRc.Core.Paths.PathNormalizer.Comparer) { [P] = FolderStatus.Waiting };
+
+        ToastRouter.ForgetLeftStatuses(shown, [TestRows.Make(P, FolderStatus.Waiting), TestRows.Make(P.ToUpperInvariant(), FolderStatus.Off)]);
+        Assert.Equal(FolderStatus.Waiting, shown[P]);
+
+        ToastRouter.ForgetLeftStatuses(shown, [TestRows.Make(P.ToUpperInvariant(), FolderStatus.Running), TestRows.Make(P, FolderStatus.Waiting)]);
+        Assert.Empty(shown);
+    }
+
+    [Fact]
     public async Task Nothing_is_shown_when_notifications_are_off()
     {
         var client = await Connect(FolderStatus.Failing, notifications: false);
