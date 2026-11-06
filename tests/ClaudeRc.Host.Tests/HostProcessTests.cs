@@ -4,6 +4,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using ClaudeRc.Core;
 using ClaudeRc.Core.Ipc;
+using ClaudeRc.Core.Paths;
 using ClaudeRc.Core.Storage;
 
 namespace ClaudeRc.Host.Tests;
@@ -88,9 +89,14 @@ public sealed class HostProcessTests
             var record = TestHost.Record(folder);
             var pid = (int)record["pid"]!;
             var child = (int)record["child_pid"]!;
+            // The real host exe matches claude.exe (SPEC 7), so the user's own claude rc sessions may be
+            // listed too, as unsaved rows it never acts on: look only at this test's folder.
             var rows = (await client.SendAsync(new ListRequest())).Rows!;
-            Assert.Equal(pid, rows.Single().Pid);
-            Assert.NotEqual(FolderStatus.Off, rows.Single().Status);
+            var row = rows.Single(r => PathNormalizer.Comparer.Equals(r.Path, folder));
+            Assert.Equal(pid, row.Pid);
+            Assert.NotEqual(FolderStatus.Off, row.Status);
+            Assert.All(rows.Where(r => !PathNormalizer.Comparer.Equals(r.Path, folder)),
+                r => Assert.True(r is { Status: FolderStatus.External, Saved: false, On: false }, TestHost.Describe(r)));
 
             host.Kill();
             Assert.True(host.WaitForExit(10_000));

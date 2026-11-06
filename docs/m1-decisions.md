@@ -205,7 +205,7 @@ at, or kill, any other process.
   A version mismatch gets `{"v":1,"ok":false,"error":"host and app versions differ: restart
   the host"}` (no `id`), and then the connection is closed. A line that is not a valid request gets
   an error response, and the connection stays open.
-- `takeover` answers an error until M3 (adoption).
+- `takeover` answered an error until M3; since M3 it is SPEC 7's take over (see `docs/m3-decisions.md`).
 - **Attach** needs a folder in the list with a running session. The host resizes the session to the
   viewer, then sends the replay as the first `output` event and streams after it. Output that arrives
   while the replay is being queued waits behind it, so the order is always right. A viewer stays

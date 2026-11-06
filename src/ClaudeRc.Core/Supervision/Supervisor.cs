@@ -299,6 +299,21 @@ public sealed class Supervisor
         return null;
     });
 
+    /// <summary>
+    /// The host could not stop the external claude rc of a <see cref="Takeover"/> (access denied,
+    /// the process changed). The row stays <c>external</c> and shows the error; the folder stays ON,
+    /// so the host starts its own session when the external one ends.
+    /// </summary>
+    public SupervisorResult TakeoverFailed(string path, string error) => Run(effects =>
+    {
+        if (Find(path) is not { } f)
+            return null;
+        f.TakeoverPending = false;
+        f.Error = "take over failed: " + error;
+        Log(effects, f, f.Error);
+        return null;
+    });
+
     // ---------------------------------------------------------------- observations
 
     /// <summary>The host launched the session requested by <see cref="StartSession"/>.</summary>

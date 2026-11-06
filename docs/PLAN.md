@@ -54,7 +54,7 @@ tools/ClaudeRc.DebugCli/
 installer/claude-rc-windows.iss
 .github/workflows/ci.yml     dotnet test on push/PR (added in M1)
 .github/workflows/release.yml  on tags v* (added in M5)
-docs/PLAN.md, docs/m0-findings.md, docs/m1-decisions.md
+docs/PLAN.md, docs/m0-findings.md, docs/m1-decisions.md … docs/m3-decisions.md
 ```
 
 ## 4. Milestones

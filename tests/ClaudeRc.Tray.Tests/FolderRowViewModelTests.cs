@@ -220,6 +220,58 @@ public class FolderRowViewModelTests
     }
 
     [Fact]
+    public void An_unsaved_row_is_marked_and_says_what_turning_it_on_does()
+    {
+        var vm = Vm(FolderStatus.External, on: false, saved: false);
+
+        Assert.True(vm.IsUnsaved);
+        Assert.Equal("not in your list", vm.UnsavedText);
+        Assert.Contains("adds the folder to your list", vm.ToggleToolTip, StringComparison.Ordinal);
+        Assert.Contains("keeps running", vm.ToggleToolTip, StringComparison.Ordinal);
+        Assert.Equal("running (started outside the app)", vm.StatusText);
+        Assert.Equal(StatusColor.Blue, vm.StatusColor);
+    }
+
+    [Theory]
+    [InlineData(FolderStatus.External, true)]
+    [InlineData(FolderStatus.Running, true)]
+    [InlineData(FolderStatus.Off, false)]
+    public void A_saved_row_is_not_marked(FolderStatus status, bool on)
+    {
+        var vm = Vm(status, on, saved: true);
+        Assert.False(vm.IsUnsaved);
+        Assert.Null(vm.UnsavedText);
+        Assert.Equal("Turn ON or OFF", vm.ToggleToolTip);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void An_external_row_enables_take_over_and_disables_show(bool on, bool saved)
+    {
+        var vm = Vm(FolderStatus.External, on, saved);
+        Assert.True(vm.TakeOverCommand.CanExecute(null));
+        Assert.False(vm.ShowCommand.CanExecute(null));
+        Assert.False(vm.RestartCommand.CanExecute(null));
+        Assert.Null(vm.TurnOffConfirmation); // OFF does not stop the external session
+    }
+
+    [Fact]
+    public void Update_raises_changes_for_saving_an_unsaved_row()
+    {
+        var vm = Vm(FolderStatus.External, on: false, saved: false);
+        var changed = new HashSet<string?>();
+        vm.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        vm.Update(TestRows.Make(P, FolderStatus.External, on: true, saved: true));
+
+        Assert.Contains(nameof(vm.IsUnsaved), changed);
+        Assert.Contains(nameof(vm.UnsavedText), changed);
+        Assert.Contains(nameof(vm.ToggleToolTip), changed);
+        Assert.False(vm.IsUnsaved);
+    }
+
+    [Fact]
     public void Update_raises_changes_for_the_new_status()
     {
         var vm = Vm(FolderStatus.Running);

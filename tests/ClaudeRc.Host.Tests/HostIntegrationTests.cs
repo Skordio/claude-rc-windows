@@ -297,7 +297,7 @@ public sealed class HostIntegrationTests
     }
 
     [Fact]
-    public async Task Remove_only_when_off_and_takeover_is_not_available_yet()
+    public async Task Remove_only_when_off_and_takeover_needs_an_external_session()
     {
         await using var host = await TestHost.StartAsync();
         var folder = host.NewFolder(new { });
@@ -310,7 +310,7 @@ public sealed class HostIntegrationTests
 
         var takeover = await host.Send(new TakeoverRequest(folder));
         Assert.False(takeover.Ok);
-        Assert.Contains("M3", takeover.Error, StringComparison.Ordinal);
+        Assert.Contains("started outside the app", takeover.Error, StringComparison.Ordinal);
 
         await host.SendOk(new SetRequest(folder, false));
         await host.WaitForStatus(folder, FolderStatus.Off);

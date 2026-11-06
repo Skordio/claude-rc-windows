@@ -7,6 +7,8 @@
 //   record_env      names of environment variables to put into "env" (PATH is always included)
 //   spawn_child     true: start a child FakeClaude (own hidden console, ignores Ctrl+C, sleeps
 //                   forever) before writing the record, so a test can check Job Object cleanup
+//   spawn_child_args arguments for that child, before "--fake-child" (e.g. ["rc"], so the child
+//                   looks like claude rc itself; default none)
 //   replay          file whose bytes are written to stdout unchanged (e.g. a tests/fixtures/*.raw)
 //   print           text written to stdout after the replay
 //   prompt          text written to stdout after that; input lines are then read (see input_file)
@@ -17,7 +19,10 @@
 //   ignore_ctrl_c   true: Ctrl+C is ignored (to test the 5 s kill); otherwise Ctrl+C exits with 0
 //   exit_after_ms   exit on its own after this long, with exit_code (default 0), after writing exit_text
 //
-// "--fake-child" on the command line is the child mode used by spawn_child.
+// "--fake-child" anywhere on the command line is the child mode used by spawn_child.
+// "--fake-config <file>" anywhere on the command line reads that file instead of fakeclaude.json
+// (so a FakeClaude started outside the host, as "rc --fake-config x.json", can behave differently
+// from the host's sessions in the same folder).
 // "--version" alone prints "0.0.0-fake (Claude Code)" and exits, like claude --version.
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -36,7 +41,7 @@ internal static partial class Program
 
     private static int Main(string[] args)
     {
-        if (args is ["--fake-child"])
+        if (args.Contains("--fake-child"))
             return Child();
         if (args is ["--version"])
         {
@@ -44,7 +49,9 @@ internal static partial class Program
             return 0;
         }
 
-        var config = Config.Load(Path.Combine(Environment.CurrentDirectory, "fakeclaude.json"));
+        var configIndex = Array.IndexOf(args, "--fake-config");
+        var configFile = configIndex >= 0 && configIndex + 1 < args.Length ? args[configIndex + 1] : "fakeclaude.json";
+        var config = Config.Load(Path.GetFullPath(configFile));
         Console.OutputEncoding = new UTF8Encoding(false);
         Console.InputEncoding = new UTF8Encoding(false);
         EnableVirtualTerminal();
@@ -58,7 +65,7 @@ internal static partial class Program
                 Stop.Set();
         };
 
-        int? childPid = config.SpawnChild ? SpawnChild() : null;
+        int? childPid = config.SpawnChild ? SpawnChild(config.SpawnChildArgs) : null;
         if (config.Record is { } record)
             WriteRecord(record, args, config.RecordEnv, childPid);
 
@@ -105,13 +112,15 @@ internal static partial class Program
         return 0;
     }
 
-    private static int SpawnChild()
+    private static int SpawnChild(IReadOnlyList<string> childArgs)
     {
         var psi = new ProcessStartInfo(Environment.ProcessPath!)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+        foreach (var arg in childArgs)
+            psi.ArgumentList.Add(arg);
         psi.ArgumentList.Add("--fake-child");
         using var child = Process.Start(psi)!;
         return child.Id;
@@ -219,6 +228,7 @@ internal sealed record Config
     public string? Record { get; init; }
     public IReadOnlyList<string> RecordEnv { get; init; } = [];
     public bool SpawnChild { get; init; }
+    public IReadOnlyList<string> SpawnChildArgs { get; init; } = [];
     public string? Replay { get; init; }
     public string? Print { get; init; }
     public string? Prompt { get; init; }
@@ -247,6 +257,9 @@ internal sealed record Config
                 ? [.. names.EnumerateArray().Select(n => n.GetString()!)]
                 : [],
             SpawnChild = Bool("spawn_child"),
+            SpawnChildArgs = root.TryGetProperty("spawn_child_args", out var childArgs)
+                ? [.. childArgs.EnumerateArray().Select(n => n.GetString()!)]
+                : [],
             Replay = FilePath("replay"),
             Print = Str("print"),
             Prompt = Str("prompt"),

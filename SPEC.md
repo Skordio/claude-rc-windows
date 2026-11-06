@@ -66,6 +66,9 @@ A single list, one row per folder:
   separate "stopped unexpectedly" status). Also in the row menu any time the
   folder is ON, except for an adopted row.
 - **Take over**: adopted rows only (see 7); confirms first.
+- An unsaved row (an adopted session in a folder that is not in the list, 7)
+  has its name in italics and a "not in your list" tag; its toggle's tooltip
+  says that ON adds the folder and leaves that claude rc running.
 - **Row menu (…)**: Restart, Open folder in Explorer, Open in Windows Terminal
   (`wt.exe -d <path>`; Explorer if Windows Terminal is not installed), View
   log, Remove (only when OFF and saved; confirms first).
@@ -275,27 +278,63 @@ every ON folder again.
 
 The host scans running processes every 5 s for a `claude rc` it doesn't own:
 - `claude.exe` whose arguments start with `rc` or `remote-control` (any
-  options after), or `node.exe` running Claude's `cli.js` with those
-  arguments (older npm installs; current ones run `claude.exe`);
-- owned by the same user;
+  options after), or `node.exe` running Claude's `cli.js` (a path ending in
+  `claude-code\cli.js`, after any node options) with those arguments
+  (older npm installs; current ones run `claude.exe`). The file name of the
+  Settings claude path also counts as `claude.exe` when it is an `.exe`;
+- owned by the same user (the process token's user SID);
 - its current directory (read from the process with
-  `NtQueryInformationProcess` → PEB → `ProcessParameters.CurrentDirectory`)
-  equals a folder path, compared case-insensitively after normalisation.
+  `NtQueryInformationProcess` → PEB → `ProcessParameters.CurrentDirectory`,
+  also for 32-bit processes through their WOW64 PEB) equals a folder path,
+  compared case-insensitively after normalisation (3.2);
+- not one of the host's own sessions or their children (the members of the
+  sessions' Job Objects), and not a child of another match: claude rc's own
+  `claude.exe` children count as part of it, so each `claude rc` counts once,
+  at the top of its tree. Parents are followed by parent PID only while the
+  parent was created before the child, so a reused PID is never taken for a
+  parent.
+
+A process the host cannot open for reading (another user's, or an elevated
+`claude rc` while the host is not elevated) is not seen. The scan also runs
+right before the saved list is loaded at host start (5.4), before an `add`,
+a `set` to ON and a `restart` (so a start never races an external session the
+periodic scan has not seen yet), and right after a take over.
 
 A match shows the row as `external` ("running, started outside the app") and
 the host never starts a second session for that folder. If the folder isn't in
 the list, it is listed anyway as an unsaved row with the toggle OFF; turning it
 ON saves it (and leaves the external session running; it is taken over only by
-**Take over**).
+**Take over**). If several external sessions run in one folder, the row shows
+the oldest. An external session that starts beside a hosted one in the same
+folder is left alone, and so is the hosted one.
+
+The host never stops, signals or changes an external process for any reason
+other than **Take over** of that row's folder: not when the folder is turned
+OFF or removed, not when the host quits or restarts.
 
 **Take over** (confirm: "stops the claude rc you started yourself and
-restarts it inside the app"): stop the external process tree (Ctrl+C is not
-possible from outside, so close its main window / terminate the tree), then
-start a hosted session as in 6. Its console, supervision and restart-at-boot
-then apply.
+restarts it inside the app"): stop every external `claude rc` the last scan
+found in that folder, then start a hosted session as in 6. Its console,
+supervision and restart-at-boot then apply. Ctrl+C is not possible from
+outside, so for each:
+1. Check that the process is still the one the scan found: same PID and
+   creation time, still `claude rc` of this user, still in that folder.
+   Otherwise nothing is stopped.
+2. If it has a window of its own (its own console window, or a window of the
+   `claude rc` process itself), post `WM_CLOSE` to it and wait up to 3 s for
+   it to exit. A window of any other process is never closed: a Windows
+   Terminal tab, or the console of the shell it was started from, belongs to
+   the user's terminal.
+3. Terminate the process and its descendants (found by parent PID, each one
+   created after its parent, each terminated through a handle whose creation
+   time was checked).
+
+Each take over is written to the folder log (11), with the result. If a
+process cannot be stopped (for example an elevated one), the row stays
+`external`, its `error` says why, and the folder stays ON.
 
 If an ON folder's external session exits, the host starts its own on the next
-scan.
+scan. An unsaved row goes away when its external session exits.
 
 ## 8. Waiting-for-input detection
 
@@ -390,7 +429,9 @@ crashes_10m, started_at?, pid?, error?, last_lines?}`. Optional fields are left 
 empty. `error` holds why the folder cannot be started (6.1, 6.2); the spec
 asks for that error "on the row", so the row needs a field for it. For the
 same reason `last_lines` holds the last 20 console lines of the session that
-exited last, sent only while the row is `failing` (5.2).
+exited last, sent only while the row is `failing` (5.2). `error` also says
+why a take over failed (7). For an `external` row, `pid` is the external
+process's PID.
 
 Payloads: `list` replies with `rows`; `log` with `lines`; `settings.get` with
 `settings` (`{claude_path, notifications}`, `claude_path` always present, null

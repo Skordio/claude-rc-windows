@@ -79,6 +79,9 @@ internal sealed class TestHost : IAsyncDisposable
             Options = Options,
             UserProfile = Profile,
             Environment = SessionEnvironmentForTests,
+            // Adoption: only FakeClaude counts as claude, so a test host never lists (let alone
+            // touches) the user's own claude rc sessions.
+            ExternalImageNames = [Path.GetFileName(FakeClaudeHarness.FakeClaudeExe)],
         }.WithTimeScale(TimeScale);
         return _configure is null ? config : _configure(config);
     }

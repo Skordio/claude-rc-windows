@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Security.Principal;
 using System.Text.Json;
 using ClaudeRc.Core;
+using ClaudeRc.Core.Adoption;
 using ClaudeRc.Core.Claude;
 using ClaudeRc.Core.Hosting;
 using ClaudeRc.Core.Ipc;
@@ -12,6 +13,7 @@ using ClaudeRc.Core.Logging;
 using ClaudeRc.Core.Paths;
 using ClaudeRc.Core.Storage;
 using ClaudeRc.Core.Supervision;
+using ClaudeRc.Host.Adoption;
 using ClaudeRc.Host.Ipc;
 using ClaudeRc.Host.Sessions;
 
@@ -44,6 +46,20 @@ internal sealed record HostConfig
     /// <summary>The environment for each start, also searched for claude (SPEC 6.3: fresh from the registry).</summary>
     public Func<IReadOnlyDictionary<string, string>> Environment { get; init; } = SessionEnvironment.FromRegistry;
 
+    /// <summary>How often running processes are scanned for external claude rc sessions (SPEC 7: 5 s).</summary>
+    public TimeSpan ExternalScanInterval { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Test seam: when set, only processes with these image names count as claude for adoption, and
+    /// the node rule is off. Null (the default) is SPEC 7: <c>claude.exe</c>, <c>node.exe … cli.js</c>
+    /// and the file name of the claude path setting. In-process test hosts set FakeClaude.exe only,
+    /// so they never even list the user's own claude rc sessions.
+    /// </summary>
+    public IReadOnlyList<string>? ExternalImageNames { get; init; }
+
+    /// <summary>Take over: how long to wait for an external claude rc to exit after its window was asked to close (SPEC 7). Real time.</summary>
+    public TimeSpan TakeoverCloseGrace { get; init; } = TimeSpan.FromSeconds(3);
+
     /// <summary>
     /// The test seam for time: multiplies every supervision timing (backoff, failing window, stable
     /// uptime, missing-folder re-checks, starting timeout, start stagger, start-error retry) and the
@@ -70,6 +86,7 @@ internal sealed record HostConfig
                 StartErrorRetry = S(s.StartErrorRetry),
             },
             PromptScanInterval = S(PromptScanInterval),
+            ExternalScanInterval = S(ExternalScanInterval),
         };
     }
 }
@@ -106,6 +123,14 @@ internal static class HostExitCodes
 /// The tick loop calls <see cref="Supervisor.Tick"/> once a second, or sooner at
 /// <see cref="Supervisor.NextDueAt"/>, and is woken by every other input.
 /// </para>
+/// <para>
+/// The process scan (SPEC 7) runs before the saved list is loaded, every
+/// <see cref="HostConfig.ExternalScanInterval"/>, before a request that may start a session, and
+/// right after a take over. It lists processes outside the lock, then, under it, leaves out the
+/// sessions' job members and processes that have exited since, and reports each folder's change to
+/// <see cref="Supervisor.ExternalChanged"/>. Only a take over stops an external process, and only
+/// the ones the last scan found in that folder, each checked again just before.
+/// </para>
 /// </remarks>
 internal sealed class HostApp : IAsyncDisposable
 {
@@ -140,6 +165,11 @@ internal sealed class HostApp : IAsyncDisposable
     private Task? _tickLoop;
     private bool _rowsDirty;
     private readonly List<ToastEvent> _toasts = [];
+    private readonly SemaphoreSlim _scanGate = new(1, 1);
+    private IReadOnlyDictionary<string, IReadOnlyList<ExternalSession>> _externals =
+        new Dictionary<string, IReadOnlyList<ExternalSession>>(PathNormalizer.Comparer);
+    private ExternalSessionMatcher? _matcher;
+    private Task? _scanLoop;
     private int _disposed;
 
     private HostApp(HostConfig config)
@@ -218,10 +248,12 @@ internal sealed class HostApp : IAsyncDisposable
         lock (_lock)
         {
             _server.Start();
-            // M3 adds the process scan, whose first result goes to ExternalChanged before Load.
+            // SPEC 5.4: a folder with an external claude rc is not started, so scan before Load.
+            ScanExternal();
             Run(s => s.Load(folders));
         }
         _tickLoop = Task.Run(TickLoop);
+        _scanLoop = Task.Run(ScanLoop);
     }
 
     // ------------------------------------------------------------------ supervisor plumbing
@@ -255,7 +287,10 @@ internal sealed class HostApp : IAsyncDisposable
                     StopSession(stop.Path);
                     break;
                 case StopExternal external:
-                    HostLog(Inv($"take over of pid {external.Pid} in {external.Path} is not available until M3"));
+                    var targets = _externals.TryGetValue(external.Path, out var found) ? found : [];
+                    var matcher = _matcher ?? CreateMatcher();
+                    _background.RemoveAll(t => t.IsCompleted);
+                    _background.Add(Task.Run(() => TakeOver(external.Path, external.Pid, targets, matcher)));
                     break;
                 case FolderChanged or FolderRemoved:
                     _rowsDirty = true;
@@ -470,6 +505,121 @@ internal sealed class HostApp : IAsyncDisposable
         }
     }
 
+    // ------------------------------------------------------------------ external sessions (SPEC 7)
+
+    private ExternalSessionMatcher CreateMatcher() => _config.ExternalImageNames is { } names
+        ? new ExternalSessionMatcher(_o.UserSid, names, matchNodeCli: false)
+        : ExternalSessionMatcher.ForHost(_o.UserSid, _settings.ClaudePath);
+
+    private async Task ScanLoop()
+    {
+        var token = _stop.Token;
+        while (!token.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(_config.ExternalScanInterval, _time, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            ScanExternal();
+        }
+    }
+
+    /// <summary>
+    /// One process scan: lists processes (outside the lock), then under the lock leaves out the
+    /// host's own and the exited ones and reports what changed per folder. Scans never overlap.
+    /// </summary>
+    private void ScanExternal()
+    {
+        _scanGate.Wait();
+        try
+        {
+            ExternalSessionMatcher matcher;
+            lock (_lock)
+                matcher = _matcher = CreateMatcher();
+            var processes = WindowsProcesses.Snapshot(matcher.IsCandidateImage);
+            lock (_lock)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                    return;
+                // Under the lock, so a session started since the snapshot is in a job by now, and one
+                // that exited since is no longer alive.
+                // Hosted processes are the sessions' job members. Not the host itself: whatever the
+                // user starts from a process the host started (none in production; the test runner
+                // in tests) is not the host's.
+                var own = new HashSet<int>();
+                foreach (var session in _sessions.Values)
+                {
+                    own.Add(session.ProcessId);
+                    own.UnionWith(session.JobProcessIds());
+                }
+                var sessions = matcher.Match(processes, own).Where(s => WindowsProcesses.IsAlive(s.Pid, s.StartTime));
+                ApplyExternals(ExternalSessionMatcher.ByFolder(sessions));
+            }
+        }
+#pragma warning disable CA1031 // A failed scan is logged and the next one tries again.
+        catch (Exception e)
+#pragma warning restore CA1031
+        {
+            HostLog("process scan failed: " + e.Message);
+        }
+        finally
+        {
+            _scanGate.Release();
+        }
+    }
+
+    private void ApplyExternals(IReadOnlyDictionary<string, IReadOnlyList<ExternalSession>> found)
+    {
+        var before = _externals;
+        _externals = found;
+        foreach (var path in before.Keys.Concat(found.Keys).Distinct(PathNormalizer.Comparer).ToList())
+        {
+            int? was = before.TryGetValue(path, out var b) ? b[0].Pid : null;
+            int? now = found.TryGetValue(path, out var n) ? n[0].Pid : null;
+            if (was != now)
+                Run(s => s.ExternalChanged(path, now));
+        }
+    }
+
+    /// <summary>
+    /// Take over (SPEC 7): stops the external claude rc processes the last scan found in the folder
+    /// (each checked again first), logs it, then scans at once so the hosted start follows.
+    /// </summary>
+    private void TakeOver(string path, int pid, IReadOnlyList<ExternalSession> targets, ExternalSessionMatcher matcher)
+    {
+        string? error = null;
+        try
+        {
+            if (targets.Count == 0)
+                HostLog(Inv($"take over of {path}: pid {pid} is no longer listed; nothing to stop"));
+            foreach (var target in targets)
+            {
+                var outcome = ExternalStopper.Stop(target, matcher, _config.TakeoverCloseGrace);
+                var message = outcome.Stopped
+                    ? Inv($"took over: stopped the external claude rc (pid {outcome.Pid}), {(outcome.ClosedWindow ? "its window was closed, " : "")}{outcome.Terminated} process(es) of its tree terminated")
+                    : Inv($"take over: could not stop the external claude rc (pid {outcome.Pid}): {outcome.Error}");
+                lock (_lock)
+                    FolderLog(path, message);
+                HostLog($"{path}: {message}");
+                error ??= outcome.Stopped ? null : outcome.Error;
+            }
+        }
+#pragma warning disable CA1031 // A failed take over must reach the row.
+        catch (Exception e)
+#pragma warning restore CA1031
+        {
+            HostLog($"take over of {path} failed: {e}");
+            error = e.Message;
+        }
+        if (error is not null)
+            Run(s => s.TakeoverFailed(path, error));
+        ScanExternal();
+    }
+
     // ------------------------------------------------------------------ viewers
 
     /// <summary>
@@ -622,9 +772,10 @@ internal sealed class HostApp : IAsyncDisposable
                 lock (_lock)
                     _background.Add(send);
                 return;
-            case TakeoverRequest:
-                client.Send(Fail(request, "take over is not available yet: it comes with adoption of external sessions in M3"));
-                return;
+            // A start must not race an external claude rc that the periodic scan has not seen yet.
+            case AddRequest or SetRequest { On: true } or RestartRequest:
+                ScanExternal();
+                break;
         }
 
         lock (_lock)
@@ -636,6 +787,7 @@ internal sealed class HostApp : IAsyncDisposable
                 SetRequest set => FolderRequest(set, set.Path, p => _supervisor.SetOn(p, set.On)),
                 RestartRequest restart => FolderRequest(restart, restart.Path, _supervisor.Restart),
                 RemoveRequest remove => FolderRequest(remove, remove.Path, _supervisor.Remove),
+                TakeoverRequest takeover => FolderRequest(takeover, takeover.Path, _supervisor.Takeover),
                 AttachRequest attach => Attach(client, attach),
                 InputRequest input => Input(input),
                 ResizeRequest resize => Resize(client, resize),
@@ -851,6 +1003,8 @@ internal sealed class HostApp : IAsyncDisposable
         await _stop.CancelAsync().ConfigureAwait(false);
         if (_tickLoop is not null)
             await _tickLoop.ConfigureAwait(false);
+        if (_scanLoop is not null)
+            await _scanLoop.ConfigureAwait(false);
         await _server.DisposeAsync().ConfigureAwait(false);
 
         Session[] sessions;

@@ -199,16 +199,47 @@ public sealed class MainViewModelTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Take_over_confirms_and_shows_the_not_implemented_error()
+    public async Task Take_over_confirms_and_shows_the_hosts_error()
     {
         var client = await Connect(TestRows.Make(@"C:\a", FolderStatus.External, on: false, saved: false));
-        client.Handler = _ => new IpcResponse { Ok = false, Error = "take over is not available yet: it comes with adoption of external sessions in M3" };
+        client.Handler = _ => new IpcResponse { Ok = false, Error = "no claude rc started outside the app is running in this folder" };
 
         await _vm.TakeOverAsync(Row(@"C:\a"));
 
         Assert.Contains("stops the claude rc you started yourself and restarts it inside the app", Assert.Single(_dialogs.Confirms).Message, StringComparison.Ordinal);
+        Assert.Equal(@"C:\a", Assert.Single(client.Sent<TakeoverRequest>()).Path);
+        Assert.Contains("started outside the app", Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Take_over_accepted_shows_no_error()
+    {
+        var client = await Connect(TestRows.Make(@"C:\a", FolderStatus.External, on: false, saved: false));
+        await _vm.TakeOverAsync(Row(@"C:\a"));
         Assert.Single(client.Sent<TakeoverRequest>());
-        Assert.Contains("not available yet", Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
+        Assert.Empty(_dialogs.Errors);
+    }
+
+    [Fact]
+    public async Task Turning_on_an_unsaved_external_row_saves_it_without_asking()
+    {
+        var client = await Connect(TestRows.Make(@"C:\a", FolderStatus.External, on: false, saved: false));
+
+        await _vm.ToggleAsync(Row(@"C:\a"));
+
+        Assert.Empty(_dialogs.Confirms);
+        Assert.Equal(new SetRequest(@"C:\a", true), Assert.Single(client.Sent<SetRequest>()) with { Id = 0 });
+    }
+
+    [Fact]
+    public async Task Turning_off_an_on_external_row_asks_nothing_because_nothing_is_stopped()
+    {
+        var client = await Connect(TestRows.Make(@"C:\a", FolderStatus.External, on: true, saved: true));
+
+        await _vm.ToggleAsync(Row(@"C:\a"));
+
+        Assert.Empty(_dialogs.Confirms);
+        Assert.False(Assert.Single(client.Sent<SetRequest>()).On);
     }
 
     [Fact]

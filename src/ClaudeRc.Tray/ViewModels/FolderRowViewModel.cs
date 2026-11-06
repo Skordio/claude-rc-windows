@@ -68,7 +68,7 @@ internal sealed class FolderRowViewModel : ObservableObject
         nameof(Path), nameof(Name), nameof(IsOn), nameof(Status), nameof(StatusText), nameof(StatusColor),
         nameof(CanShow), nameof(CanRemove), nameof(CanRestart), nameof(ShowRestartButton), nameof(ShowTakeOver),
         nameof(HasPrompt), nameof(PromptText), nameof(HasError), nameof(ErrorText), nameof(HasLastLines),
-        nameof(LastLinesText), nameof(TurnOffConfirmation),
+        nameof(LastLinesText), nameof(TurnOffConfirmation), nameof(IsUnsaved), nameof(UnsavedText), nameof(ToggleToolTip),
     ];
 
     private readonly TimeProvider _time;
@@ -153,6 +153,20 @@ internal sealed class FolderRowViewModel : ObservableObject
 
     /// <summary>Take over: external rows only (SPEC 7).</summary>
     public bool ShowTakeOver => _row.Status == FolderStatus.External;
+
+    /// <summary>
+    /// An unsaved row: a claude rc started outside the app in a folder that is not in the list
+    /// (SPEC 7). It is drawn differently and its toggle says that ON adds the folder.
+    /// </summary>
+    public bool IsUnsaved => !_row.Saved;
+
+    /// <summary>The tag next to an unsaved row's name, or null.</summary>
+    public string? UnsavedText => IsUnsaved ? "not in your list" : null;
+
+    /// <summary>The ON/OFF switch's tooltip.</summary>
+    public string ToggleToolTip => IsUnsaved
+        ? "Turn ON: adds the folder to your list; the claude rc you started keeps running (use Take over to move it into the app)"
+        : "Turn ON or OFF";
 
     /// <summary>The prompt line is shown while waiting.</summary>
     public bool HasPrompt => _row.Status == FolderStatus.Waiting && !string.IsNullOrEmpty(_row.Prompt);

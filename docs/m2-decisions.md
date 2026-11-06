@@ -80,7 +80,7 @@ thread pool; the tests wait for conditions (`Eventually.True`), and the reconnec
 - **Turn OFF** asks only when a hosted session is alive (`starting`, `running`, `waiting`), with the
   spec's text. Turning OFF a `restarting`, `failing` or `missing` folder stops nothing, so it does not
   ask.
-- **Take over** asks with the spec's text (SPEC 7) and shows the host's error. Until M3 the error is
+- **Take over** asks with the spec's text (SPEC 7) and shows the host's error. Until M3 the error was
   "take over is not available yet …".
 - The ON/OFF switch is a `Button` styled as a switch, not a `ToggleButton`. A click only asks the
   view-model, and the switch shows the host's state when the next rows event arrives. A ToggleButton

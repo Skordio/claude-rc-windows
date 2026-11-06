@@ -551,6 +551,106 @@ public sealed class SupervisorTests
         Assert.False(_sup.Takeover(A).Ok);
     }
 
+    [Fact]
+    public void Take_over_of_an_unsaved_row_saves_it_on()
+    {
+        Load();
+        _sup.ExternalChanged(C, 555);
+
+        var r = _sup.Takeover(C);
+
+        Assert.Equal(new StopExternal(C, 555), Assert.Single(r.Effects.OfType<StopExternal>()));
+        Assert.Equal([new FolderEntry(C, true)], Assert.Single(r.Effects.OfType<FoldersChanged>()).Folders);
+        Assert.Contains(r.Effects.OfType<FolderLog>(), l => l.Path == C && l.Message.Contains("taking over", StringComparison.Ordinal));
+        Assert.True(Starts(_sup.ExternalChanged(C, null), C));
+    }
+
+    [Fact]
+    public void A_failed_take_over_shows_its_error_and_keeps_the_row_external()
+    {
+        Load(new FolderEntry(A, false));
+        _sup.ExternalChanged(A, 555);
+        _sup.Takeover(A);
+
+        var r = _sup.TakeoverFailed(A, "access denied");
+
+        Assert.True(r.Ok);
+        var f = _sup.Get(A)!;
+        Assert.Equal(FolderStatus.External, f.Status);
+        Assert.True(f.On);
+        Assert.Contains("access denied", f.Error, StringComparison.Ordinal);
+        Assert.Contains(r.Effects.OfType<FolderLog>(), l => l.Message.Contains("access denied", StringComparison.Ordinal));
+        Assert.Contains(r.Effects.OfType<FolderChanged>(), c => c.Folder.Path == A);
+
+        // When the external session ends after all, the host starts its own and the error goes.
+        Assert.True(Starts(_sup.ExternalChanged(A, null), A));
+        _sup.SessionStarted(A, 7);
+        Assert.Null(_sup.Get(A)!.Error);
+    }
+
+    [Fact]
+    public void Take_over_failed_for_an_unknown_folder_is_ignored()
+    {
+        Load();
+        Assert.Empty(_sup.TakeoverFailed(A, "x").Effects);
+    }
+
+    [Fact]
+    public void Only_take_over_ever_asks_to_stop_an_external_session()
+    {
+        // A saved ON folder, a saved OFF folder and an unsaved row, each with an external session.
+        Load(new FolderEntry(A, true), new FolderEntry(B, false));
+        var all = new List<SupervisorResult>
+        {
+            _sup.ExternalChanged(A, 1),
+            _sup.ExternalChanged(B, 2),
+            _sup.ExternalChanged(C, 3),
+        };
+        for (var i = 0; i < 30; i++)
+            all.Add(Advance(20));
+        all.Add(_sup.SetOn(A, false));
+        all.Add(_sup.SetOn(A, true));
+        all.Add(_sup.SetOn(B, true));
+        all.Add(_sup.SetOn(B, false));
+        all.Add(_sup.Remove(B));
+        all.Add(_sup.Restart(A));
+        all.Add(_sup.ExternalChanged(A, 4)); // the user restarted theirs
+        all.Add(_sup.Shutdown());
+        all.Add(Advance(60));
+
+        Assert.Empty(all.SelectMany(r => r.Effects).OfType<StopExternal>());
+        Assert.Empty(all.SelectMany(r => r.Effects).OfType<StopSession>());
+        Assert.Empty(all.SelectMany(r => r.Effects).OfType<StartSession>());
+        Assert.False(_sup.Get(C)!.On);
+    }
+
+    [Fact]
+    public void Take_over_names_only_its_own_folders_external_process()
+    {
+        Load(new FolderEntry(A, true));
+        _sup.ExternalChanged(A, 1);
+        _sup.ExternalChanged(C, 3);
+
+        var r = _sup.Takeover(A);
+
+        Assert.Equal([new StopExternal(A, 1)], r.Effects.OfType<StopExternal>());
+    }
+
+    [Fact]
+    public void An_external_session_that_appears_beside_a_hosted_one_does_not_stop_it()
+    {
+        Load(new FolderEntry(A, true));
+        Advance(1);
+        Launched(A);
+        _sup.ReadySeen(A);
+
+        var r = _sup.ExternalChanged(A, 99);
+
+        Assert.Empty(r.Effects.OfType<StopSession>());
+        Assert.Empty(r.Effects.OfType<StopExternal>());
+        Assert.Equal(FolderStatus.Running, Status(A));
+    }
+
     // ---- shutdown and stale events -------------------------------------------------------
 
     [Fact]
