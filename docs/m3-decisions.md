@@ -86,6 +86,10 @@ It runs:
 
 A scan that fails (Toolhelp error) is logged to host.log and the next one tries again.
 
+Lock order (review fix): the scan gate is always taken before the host lock. Host start takes the
+gate, then the lock, and scans inside both (`ScanCore`); before the fix it took the lock first, so
+a client's `add` that won the gate right after the pipe opened could deadlock the host.
+
 ## 5. Take over
 
 - The pipe op `takeover` now goes to `Supervisor.Takeover` (until M3 it answered an error). The
@@ -93,12 +97,24 @@ A scan that fails (Toolhelp error) is logged to host.log and the next one tries 
   `StopExternal`. The host runs the stop on a background task with every external session the last
   scan found **in that folder** (a folder can have more than one; the row shows the oldest).
 - `ExternalStopper.Stop`, per process:
-  1. open it (query, synchronize, terminate). If it is gone, or its creation time differs (the
-     PID now names another process), it counts as stopped and nothing is touched. With the handle
+  1. open it (query, synchronize, terminate; if terminate is denied, query only, to read its
+     creation time). If it is gone, or its creation time differs (the PID now names another
+     process, which may be one the host may not touch), it counts as stopped and nothing is
+     touched. If it is the scanned process but terminate is denied, the take over fails
+     ("… is it running as administrator?"). With the handle
      held (so the PID cannot be reused meanwhile) it reads the process again and checks
      `StillMatches`; if it no longer is `claude rc` in that folder, nothing is stopped and the take
      over fails with that message;
-  2. finds its tree: processes whose parent is in the tree and that were created after that parent;
+  2. finds its tree (`ProcessTree`, review fix): a listed process is opened, and counts as a
+     child of a member only if the parent PID it records itself (`InheritedFromUniqueProcessId`,
+     read through that handle, so a PID reused between the Toolhelp snapshot and the open is
+     caught) is the member's, it was created after the member and, if the member has exited,
+     before that exit. Every member's handle is held until the stop returns, so the PID of a
+     member that exits (normally during the `WM_CLOSE` grace) cannot go to another process whose
+     children would then look like the tree's. The host's own PID and its sessions' job members
+     are excluded: never added, walked below or terminated; if one is found below the target
+     (the host was started by hand from a shell inside that `claude rc`), nothing is stopped and
+     the take over fails with "the app's host or one of its sessions runs inside this claude rc";
   3. **windows**: visible, unowned top-level windows of the `claude rc` process itself or of a
      `conhost.exe` that is its direct child (its own console window). Those get `WM_CLOSE`, and the
      stop waits up to `TakeoverCloseGrace` (3 s) for it to exit. A window of any other process is
@@ -107,7 +123,8 @@ A scan that fails (Toolhelp error) is logged to host.log and the next one tries 
      from a shell shares the shell's console, whose host is the shell's child, not claude's. Closing
      those would close the user's terminal. In those cases step 4 does the stop;
   4. terminates the process (exit code 1), then, in two passes (to catch children started
-     meanwhile), every tree member whose creation time still matches, each through its own handle.
+     meanwhile; the tree is expanded again before each), every tree member still running, each
+     through the handle held since it was found.
      It waits up to 5 s for the process to be gone.
 - The outcome goes to the folder log ("took over: stopped the external claude rc (pid N), …
   process(es) of its tree terminated", or "take over: could not stop …") and host.log. A failure
@@ -179,6 +196,14 @@ confirmation). M3 adds:
   found one bug (the host's own PID in the excluded set hid every process started by the test
   runner), fixed in section 2. `ExternalStopperTests` were added after the stopper, as extra
   safety pins.
+- Review fixes: `ProcessTreeTests` (8, over a fake process table: a dead member whose PID went to
+  another process whose child must not be followed, a PID reused between the snapshot and the
+  open, excluded PIDs, handles held and released) and three more `ExternalStopperTests` (the host
+  or a session inside the tree: nothing stopped; a PID that now names a process the host may not
+  terminate: counts as stopped; the scanned process itself not terminable: error; the last two
+  use a test FakeClaude whose DACL grants only query). Seen failing first (stubs, or the old open
+  logic). Take-over tests now wait on a handle to the child opened while it ran, not on its bare
+  PID, which the hosted session started next could reuse.
 - Tray: 10 new test cases (251 → 261); the new properties' tests failed to compile before the properties existed.
 - Every Host test still checks that no FakeClaude is left running.
 

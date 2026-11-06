@@ -245,12 +245,22 @@ internal sealed class HostApp : IAsyncDisposable
         // The pipe is created first, so a second host fails before it starts anything; clients
         // that connect at once wait on the lock until the saved list is loaded (a request served
         // before Load could save a list without the loaded folders).
-        lock (_lock)
+        // Lock order everywhere: the scan gate, then the lock (a client's add, ON or restart scans
+        // first and then takes the lock).
+        _scanGate.Wait();
+        try
         {
-            _server.Start();
-            // SPEC 5.4: a folder with an external claude rc is not started, so scan before Load.
-            ScanExternal();
-            Run(s => s.Load(folders));
+            lock (_lock)
+            {
+                _server.Start();
+                // SPEC 5.4: a folder with an external claude rc is not started, so scan before Load.
+                ScanCore();
+                Run(s => s.Load(folders));
+            }
+        }
+        finally
+        {
+            _scanGate.Release();
         }
         _tickLoop = Task.Run(TickLoop);
         _scanLoop = Task.Run(ScanLoop);
@@ -537,6 +547,19 @@ internal sealed class HostApp : IAsyncDisposable
         _scanGate.Wait();
         try
         {
+            ScanCore();
+        }
+        finally
+        {
+            _scanGate.Release();
+        }
+    }
+
+    /// <summary><see cref="ScanExternal"/> for a caller that holds the scan gate.</summary>
+    private void ScanCore()
+    {
+        try
+        {
             ExternalSessionMatcher matcher;
             lock (_lock)
                 matcher = _matcher = CreateMatcher();
@@ -550,12 +573,7 @@ internal sealed class HostApp : IAsyncDisposable
                 // Hosted processes are the sessions' job members. Not the host itself: whatever the
                 // user starts from a process the host started (none in production; the test runner
                 // in tests) is not the host's.
-                var own = new HashSet<int>();
-                foreach (var session in _sessions.Values)
-                {
-                    own.Add(session.ProcessId);
-                    own.UnionWith(session.JobProcessIds());
-                }
+                var own = HostedProcessIds();
                 var sessions = matcher.Match(processes, own).Where(s => WindowsProcesses.IsAlive(s.Pid, s.StartTime));
                 ApplyExternals(ExternalSessionMatcher.ByFolder(sessions));
             }
@@ -566,10 +584,18 @@ internal sealed class HostApp : IAsyncDisposable
         {
             HostLog("process scan failed: " + e.Message);
         }
-        finally
+    }
+
+    /// <summary>The sessions' processes and their job members. Call under the lock.</summary>
+    private HashSet<int> HostedProcessIds()
+    {
+        var own = new HashSet<int>();
+        foreach (var session in _sessions.Values)
         {
-            _scanGate.Release();
+            own.Add(session.ProcessId);
+            own.UnionWith(session.JobProcessIds());
         }
+        return own;
     }
 
     private void ApplyExternals(IReadOnlyDictionary<string, IReadOnlyList<ExternalSession>> found)
@@ -598,7 +624,13 @@ internal sealed class HostApp : IAsyncDisposable
                 HostLog(Inv($"take over of {path}: pid {pid} is no longer listed; nothing to stop"));
             foreach (var target in targets)
             {
-                var outcome = ExternalStopper.Stop(target, matcher, _config.TakeoverCloseGrace);
+                // Never the host or its sessions, even when the host runs below this claude rc
+                // (started by hand from a shell inside it).
+                HashSet<int> protectedPids;
+                lock (_lock)
+                    protectedPids = HostedProcessIds();
+                protectedPids.Add(Environment.ProcessId);
+                var outcome = ExternalStopper.Stop(target, matcher, _config.TakeoverCloseGrace, protectedPids);
                 var message = outcome.Stopped
                     ? Inv($"took over: stopped the external claude rc (pid {outcome.Pid}), {(outcome.ClosedWindow ? "its window was closed, " : "")}{outcome.Terminated} process(es) of its tree terminated")
                     : Inv($"take over: could not stop the external claude rc (pid {outcome.Pid}): {outcome.Error}");

@@ -325,9 +325,21 @@ outside, so for each:
    it to exit. A window of any other process is never closed: a Windows
    Terminal tab, or the console of the shell it was started from, belongs to
    the user's terminal.
-3. Terminate the process and its descendants (found by parent PID, each one
-   created after its parent, each terminated through a handle whose creation
-   time was checked).
+3. Terminate the process and its descendants. A process counts as a child
+   of a tree member only if the parent PID it records itself
+   (`NtQueryInformationProcess`, read through a handle to it) is that
+   member's and it was created after the member (and, if the member has
+   exited, before it exited). Every member is opened when it is found and the
+   handle is held until the stop is done, so a PID in the tree can never be
+   reused meanwhile; each is terminated through its own handle.
+
+If the host itself, or one of its sessions, runs inside that tree (the host
+was started by hand from a shell inside that `claude rc`), nothing is stopped
+and the take over fails with "the app's host or one of its sessions runs
+inside this claude rc; ... Stop it by hand". If the scanned PID now names
+another process that the host may not open to terminate (an elevated one),
+its creation time is read with query access only: a different one means the
+scanned process is gone, which counts as stopped.
 
 Each take over is written to the folder log (11), with the result. If a
 process cannot be stopped (for example an elevated one), the row stays

@@ -133,8 +133,7 @@ public sealed class AdoptionTests
         await using var host = await TestHost.StartAsync();
         var folder = host.NewFolder(new { record = "record.json" });
         using var external = ExternalFake.Start(folder, new { spawn_child = true });
-        var child = external.ChildPid!.Value;
-        Assert.True(FakeClaudeHarness.IsRunning(child));
+        using var child = external.OpenChild();
         await host.WaitForStatus(folder, FolderStatus.External);
 
         await host.SendOk(new TakeoverRequest(folder));
@@ -143,7 +142,7 @@ public sealed class AdoptionTests
             "hosted session after take over");
         Assert.True(row!.On);
         Assert.True(row.Saved);
-        FakeClaudeHarness.WaitUntil(() => !external.IsRunning && !FakeClaudeHarness.IsRunning(child), "external tree stopped");
+        FakeClaudeHarness.WaitUntil(() => !external.IsRunning && child.HasExited, "external tree stopped");
         Assert.Equal((int)TestHost.Record(folder)["pid"]!, row.Pid);
         Assert.Equal([new FolderEntry(row.Path, true)], new FoldersStore(host.DataDir).Load());
         var log = await LogLines(host, folder);
@@ -157,7 +156,8 @@ public sealed class AdoptionTests
         await using var host = await TestHost.StartAsync();
         var folder = host.NewFolder(new { });
         using var external = ExternalFake.Start(folder, new { spawn_child = true, spawn_child_args = new[] { "rc" } });
-        var child = external.ChildPid!.Value;
+        using var childProcess = external.OpenChild();
+        var child = childProcess.Id;
 
         var row = await host.WaitForStatus(folder, FolderStatus.External);
         Assert.Equal(external.Pid, row.Pid);
@@ -168,7 +168,7 @@ public sealed class AdoptionTests
         Assert.DoesNotContain(host.Events.OfType<RowsEvent>().SelectMany(e => e.Rows), r => r.Pid == child);
 
         await host.SendOk(new TakeoverRequest(folder));
-        FakeClaudeHarness.WaitUntil(() => !external.IsRunning && !FakeClaudeHarness.IsRunning(child), "external tree stopped");
+        FakeClaudeHarness.WaitUntil(() => !external.IsRunning && childProcess.HasExited, "external tree stopped");
         await host.WaitForRow(folder, r => r is { Status: FolderStatus.Running } && r.Pid != external.Pid && r.Pid != child, "hosted");
     }
 
@@ -183,7 +183,10 @@ public sealed class AdoptionTests
 
         await SeveralScans();
 
-        Assert.Empty(await host.List());
+        // Only these folders: a FakeClaude rc of another test run on this machine would be listed too.
+        var rows = await host.List();
+        Assert.True(RowOf(rows, a) is null && RowOf(rows, b) is null,
+            "adopted: " + string.Join("; ", rows.Select(r => FormattableString.Invariant($"{r.Path} pid {r.Pid} {r.Status}"))));
     }
 
     [Fact]

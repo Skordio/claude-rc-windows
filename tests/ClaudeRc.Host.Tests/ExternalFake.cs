@@ -27,6 +27,9 @@ internal sealed class ExternalFake : IDisposable
     public string Folder { get; }
     public int Pid => _process.Id;
 
+    /// <summary>The handle this test got when it started the process (full access).</summary>
+    public Microsoft.Win32.SafeHandles.SafeProcessHandle Handle => _process.SafeHandle;
+
     /// <summary>
     /// Starts FakeClaude in <paramref name="folder"/> with <paramref name="args"/> (the config option
     /// is added after them) and waits until it has written its record, so its working folder and
@@ -65,6 +68,22 @@ internal sealed class ExternalFake : IDisposable
     public JsonObject Record() => TestHost.Record(Folder, RecordName);
 
     public int? ChildPid => Record()["child_pid"] is { } c ? (int)c : null;
+
+    /// <summary>
+    /// The child (spawn_child), opened now and held, so waiting on it can never be fooled by its id
+    /// being reused once it has exited.
+    /// </summary>
+    public Process OpenChild()
+    {
+        var child = Process.GetProcessById(ChildPid!.Value);
+        _ = child.SafeHandle; // opened now: HasExited later asks this handle, not the bare id
+        if (child.HasExited || child.StartTime < _process.StartTime)
+        {
+            child.Dispose();
+            throw new InvalidOperationException("the child is not running");
+        }
+        return child;
+    }
 
     public bool IsRunning => FakeClaudeHarness.IsRunning(Pid) && !_process.HasExited;
 
