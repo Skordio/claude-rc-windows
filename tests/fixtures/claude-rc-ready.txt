@@ -1,0 +1,9 @@
+Spawn mode: same-dir (saved for this folder; press w to change)
+
+·✔· Connected · gitB · master
+    Capacity: 1/32 · New sessions will be created in the current directory
+    m0 "q" & %PATH% 50%
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01XXXXXXXXXXXXXXXXXXXXXX
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode

@@ -1,0 +1,57 @@
+[?9001h[?1004h[?25l[2J[m[2;1HRemote Control starts Claude Code sessions in this folder, driven from your other devices:
+  C:\Users\Steven\AppData\Local\Temp\claude\df26003eaca5f50f\f2d7163b-5b2c-5af6-9458-d70f3598d9aa\scratchpad\m0\runs\gitA[6;1HQuick safety check: is this a project you created or one you trust? Sessions started here can read, edit, and execute files, and this folder's project settings (hooks, MCP servers, permission rules, helper commands) apply to them.
+Security guide: https://code.claude.com/docs/en/security
+]0;C:\Users\Steven\.local\bin\claude.exe[?25h[?25lTrust C:\Users\Steven\AppData\Local\Temp\claude\df26003eaca5f50f\f2d7163b-5b2c-5af6-9458-d70f3598d9aa\scratchpad\m0\runs\gitA? [y/N][K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[10;14H[?25hy
+[?25l
+Remote Control is launching in spawn mode, which lets you start new sessions in this project from claude.ai/code or the Claude mobile app. Learn more: https://code.claude.com/docs/en/remote-control[15;1HSpawn mode for this project:
+  [1] same-dir — sessions share the current directory (default)
+  [2] worktree — each session gets an isolated git worktree[19;1HThis can be changed later or explicitly set with --spawn=same-dir or --spawn=worktree.[21;1H[?25h[?25lChoose [1/2] (default: 1):[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[21;28H[?25h

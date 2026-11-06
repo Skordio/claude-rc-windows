@@ -1,0 +1,15 @@
+﻿         3 ms  10:12:54.575  exe=C:\Users\Steven\.local\bin\claude.exe
+        20 ms  10:12:54.588  cwd=C:\Users\Steven\AppData\Local\Temp\claude\df26003eaca5f50f\f2d7163b-5b2c-5af6-9458-d70f3598d9aa\scratchpad\m0\runs\gitB
+        20 ms  10:12:54.588  cmdline=C:\Users\Steven\.local\bin\claude.exe rc --name "m0 \"q\" & %PATH% 50%"
+        20 ms  10:12:54.588  argv[1]=<rc>
+        20 ms  10:12:54.588  argv[2]=<--name>
+        20 ms  10:12:54.588  argv[3]=<m0 "q" & %PATH% 50%>
+        32 ms  10:12:54.600  pseudoconsole 120x40 created
+        47 ms  10:12:54.615  started pid=29552
+       169 ms  10:12:54.737  job pids=29552:claude
+     18568 ms  10:13:13.137  job pids=28428:conhost,29552:claude,28976:claude
+     20011 ms  10:13:14.579  input (auto-stop Ctrl+C) hex=03
+     20499 ms  10:13:15.068  exited code=0 (0x00000000) killed=False t=20.499s after-ctrl-c=0.489s
+     21006 ms  10:13:15.574  job pids after exit=
+     21011 ms  10:13:15.579  reader EOF
+     21011 ms  10:13:15.579  total bytes=4804

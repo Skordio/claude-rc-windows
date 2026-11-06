@@ -1,0 +1,3 @@
+# M0 fixtures: raw ConPTY bytes must never be line-ending converted.
+tests/fixtures/*.raw binary
+tests/fixtures/*.txt text eol=lf

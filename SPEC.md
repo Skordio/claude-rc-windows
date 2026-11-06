@@ -145,7 +145,8 @@ started (see 7).
 ### 6.1 Finding claude
 In order: the settings override; `%USERPROFILE%\.local\bin\claude.exe`
 (native installer); `claude.exe` on PATH; `claude.cmd` on PATH (npm global
-install, which runs under node). If none: every ON folder shows an error row
+install: current versions run a native `claude.exe` inside `node_modules`,
+older ones run `cli.js` under node). If none: every ON folder shows an error row
 "claude not found: install Claude Code or set its path in Settings", and the
 host re-checks every 60 s. The detected path and `claude --version` show in
 the status bar.
@@ -154,7 +155,8 @@ the status bar.
 Nobody is watching the console, so before every start the host makes sure
 `%USERPROFILE%\.claude.json` has, under `projects["<folder path as Claude
 keys it>"]`:
-- `hasTrustDialogAccepted: true` (the folder-trust prompt);
+- `hasTrustDialogAccepted: true` (the folder-trust prompt, which `claude rc`
+  shows itself: "Trust <path>? [y/N]");
 - `remoteControlSpawnMode: "same-dir"`, **only if the key is absent**. In a
   git repo without a saved choice, `claude rc` otherwise stops at "Spawn mode
   for this project: [1] same-dir [2] worktree, Choose [1/2]". A saved
@@ -163,9 +165,12 @@ keys it>"]`:
 Rules: touch only these two keys; read-modify-write with an atomic replace
 (write temp file in the same folder, then `File.Replace`); skip the write if
 nothing changes; if the file isn't valid JSON, don't touch it and show the
-error on the row. The exact project key format on Windows (path separators,
-drive-letter case) must be confirmed against a real `claude` install in M0
-(see 16) and pinned by a test.
+error on the row. The project key (confirmed in M0 against claude 2.1.318,
+see `docs/m0-findings.md`) is the working-directory string exactly as passed
+to claude with every `\` replaced by `/` (`C:/Users/me/src/app`). There is no
+case folding, not even of the drive letter, and claude looks keys up
+case-sensitively, so the host passes the normalised path (3.2) as the working
+directory and builds the key from that same string. Pinned by a test.
 
 Do not pass `--spawn` on the command line instead: it would override a
 folder's saved choice.
@@ -175,9 +180,14 @@ folder's saved choice.
 folder, inside a pseudo-console (ConPTY) owned by the host, initial size
 120×40. `<window name>` = the row's display name (3.1). The arguments are
 passed as an argument list (`ProcessStartInfo.ArgumentList` semantics for
-`claude.exe`; for `claude.cmd`, run `node` with the resolved `cli.js` path
+`claude.exe`; for `claude.cmd`, run the program the shim launches directly
 rather than going through `cmd.exe`, so no folder name is ever parsed by a
-shell). The environment is the host's user environment (user + system
+shell: in current npm installs that is
+`node_modules\@anthropic-ai\claude-code\bin\claude.exe`; an older shim that
+runs `node … cli.js` is run as `node` with the resolved `cli.js` path).
+`--name` names only a newly created session: claude rc keeps a per-folder
+pointer (`~\.claude\projects\<folder>\bridge-pointer.json`) and on a restart
+reattaches that session, which keeps the name it was created with. The environment is the host's user environment (user + system
 variables, refreshed from the registry at each start so PATH changes take
 effect without a reboot).
 
@@ -189,6 +199,10 @@ so all its child processes belong to it and die with it.
 2. Wait up to 5 s for the process to exit.
 3. Terminate the Job Object (kills the whole tree).
 
+In M0 claude rc exited with code 0 about 0.5 to 0.9 s after one Ctrl+C. It
+can also stop reading its input (seen after a trust prompt was answered by
+hand), and then Ctrl+C does nothing, so step 3 is always needed.
+
 ### 6.5 If the host dies
 The Job Objects close with it, so every session dies too (no orphans the host
 can't reattach to). The scheduled task restarts the host (9.3), which starts
@@ -199,7 +213,7 @@ every ON folder again.
 The host scans running processes every 5 s for a `claude rc` it doesn't own:
 - `claude.exe` whose arguments start with `rc` or `remote-control` (any
   options after), or `node.exe` running Claude's `cli.js` with those
-  arguments;
+  arguments (older npm installs; current ones run `claude.exe`);
 - owned by the same user;
 - its current directory (read from the process with
   `NtQueryInformationProcess` → PEB → `ProcessParameters.CurrentDirectory`)
@@ -224,8 +238,9 @@ scan.
 
 The host keeps a headless terminal emulator per session, fed from the
 ConPTY output, so it always knows the current screen. Every 2 s, for each
-running session, look at the last non-empty line of the screen. It is a
-prompt if it:
+running session, look at the last non-empty line of the screen, with
+soft-wrapped rows joined back into one line (the trust prompt's path often
+wraps at 120 columns and could split `[y/N]`). It is a prompt if it:
 - contains a bracketed choice: `[1/2]`, `[1/2/3]`, `[y/N]`, `[Y/n]`,
   `[yes/no]`, `(y/n)`, `(yes/no)` (case-insensitive), and
 - ends with `:`, `?`, `]` or `)`, meaning nothing has been typed after it.
@@ -400,7 +415,8 @@ when wanted.
   (adds both keys, keeps an existing `worktree`, touches nothing else, no write
   when unchanged, refuses invalid JSON); path normalisation and duplicate
   basenames; prompt heuristic with the real claude rc ready lines as
-  negatives and `Choose [1/2] (default: 1):` as a positive.
+  negatives and `Choose [1/2] (default: 1):` and `Trust <path>? [y/N]` as
+  positives (fixtures in `tests/fixtures/`, captured in M0).
 - **Host (integration)** with `FakeClaude.exe`, whose behaviour is chosen by
   a file in its working folder: run until stopped, exit with code N after T
   seconds, print a prompt and wait for input, print ready output, record its
