@@ -49,8 +49,9 @@ Unofficial; not affiliated with or endorsed by Anthropic.
 A single list, one row per folder:
 - **Status dot + text** (see 4): green running, yellow waiting/restarting,
   red failing/missing, grey off, blue "running (started outside the app)".
-- **Folder name** (basename; `parent\name` if two share a basename) and the
-  full path below it.
+- **Folder name** (basename; `parent\name` if two share a basename, compared
+  case-insensitively; if `parent\name` still collides, more leading folders are
+  added until the names differ) and the full path below it.
 - **ON/OFF toggle.** Turning OFF a running folder asks for confirmation
   ("stops the running claude rc session; it won't come back at logon/boot").
 - **Show**: opens the console viewer (3.3). Disabled for adopted rows.
@@ -106,7 +107,7 @@ the main window at that row. Off via settings.
 | `starting` | Process launched, not yet seen ready (max 30 s, then `running`). | yes |
 | `running` | Session process alive and not at a prompt. | yes |
 | `waiting` | Alive, but its console ends at an unanswered prompt (see 8). `prompt` holds the text. | yes |
-| `restarting` | Exited; waiting out the backoff before the next start. Shows "restarting in Ns" and the last exit code. | yes |
+| `restarting` | Exited (or a start failed, see 6.1); waiting out the backoff before the next start. Shows "restarting in Ns" and the last exit code. | yes |
 | `failing` | Too many crashes (see 5); retries stopped until **Restart**. | yes |
 | `missing` | Folder does not exist (e.g. drive not mounted). Retried (see 5.3). | yes |
 | `external` | A `claude rc` started outside the app is running in this folder (see 7). | either |
@@ -148,8 +149,14 @@ In order: the settings override; `%USERPROFILE%\.local\bin\claude.exe`
 install: current versions run a native `claude.exe` inside `node_modules`,
 older ones run `cli.js` under node). If none: every ON folder shows an error row
 "claude not found: install Claude Code or set its path in Settings", and the
-host re-checks every 60 s. The detected path and `claude --version` show in
+host re-checks every 60 s. A settings override that does not exist is an error
+("claude path from Settings not found: …"); the host does not silently fall
+back to the other locations. The detected path and `claude --version` show in
 the status bar.
+
+Any failed start (claude not found, `.claude.json` invalid (6.2), launch error)
+puts the row in `restarting` with the message in the row's `error` field and
+retries after 60 s. It never counts as a crash (5.2).
 
 ### 6.2 Before each start: preset Claude's per-folder prompts
 Nobody is watching the console, so before every start the host makes sure
@@ -241,11 +248,14 @@ ConPTY output, so it always knows the current screen. Every 2 s, for each
 running session, look at the last non-empty line of the screen, with
 soft-wrapped rows joined back into one line (the trust prompt's path often
 wraps at 120 columns and could split `[y/N]`). It is a prompt if it:
-- contains a bracketed choice: `[1/2]`, `[1/2/3]`, `[y/N]`, `[Y/n]`,
-  `[yes/no]`, `(y/n)`, `(yes/no)` (case-insensitive), and
+- contains a bracketed choice: `[1/2]`, `[1/2/3]` (any `/`-separated list of
+  numbers in square brackets), `[y/N]`, `[Y/n]`, `[yes/no]`, `(y/n)`,
+  `(yes/no)` (case-insensitive), and
 - ends with `:`, `?`, `]` or `)`, meaning nothing has been typed after it.
 
-Then status = `waiting`, `prompt` = that line (trimmed, max 200 chars). Keep
+Then status = `waiting`, `prompt` = that line (trimmed, max 200 chars; a
+longer line keeps its start and its end around `…`, so the choice stays
+visible). Keep
 the heuristic conservative: claude rc's normal ready output ("Continue coding
 in the Claude mobile app or …", "Capacity: 0/32 · …", "space to show QR code",
 "Spawn mode: same-dir (saved for this folder; press w to change)") must never
@@ -315,12 +325,22 @@ Requests (tray → host), each with an `id`; the host replies
 | `log` | `path`, `lines` | Return the last N lines of the folder log. |
 | `settings.get` / `settings.set` | | claude path, notifications (start mode is changed by the tray app through Task Scheduler, then the host reloads). |
 
-Events (host → tray, no `id`): `rows` (pushed on any status change),
-`output` (`path`, base64 bytes, while attached), `toast` (`path`, `status`,
-`text`).
+Events (host → tray, no `id`), named by an `event` field: `rows` (pushed on
+any status change), `output` (`path`, base64 bytes in `data`, while attached),
+`toast` (`path`, `status`, `text`).
 
 Row: `{path, name, on, saved, status, prompt?, exit_code?, restart_in_s?,
-crashes_10m, started_at?, pid?}`.
+crashes_10m, started_at?, pid?, error?}`. Optional fields are left out when
+empty. `error` holds why the folder cannot be started (6.1, 6.2); the spec
+asks for that error "on the row", so the row needs a field for it.
+
+Payloads: `list` replies with `rows`; `log` with `lines`; `settings.get` with
+`settings` (`{claude_path, notifications}`, `claude_path` always present, null
+= auto-detect) and `info` (`{host_version, data_dir, log_dir, claude_path?,
+claude_version?, claude_error?}`, the read-only facts of 3.4 and the status
+bar). `settings.set` sends both settings. `input.data` is text (the viewer's
+keystrokes), written to the pseudo-console as UTF-8. The message types and
+their encoding live in `ClaudeRc.Core.Ipc` and are pinned by tests.
 
 The tray app is purely a client: if the host isn't running it shows "Host not
 running" and **Start host**.
@@ -334,8 +354,11 @@ running" and **Start host**.
 | `%LOCALAPPDATA%\claude-rc-windows\logs\host.log` | Host events, rolled at 5 MB, keep 3. |
 | `%LOCALAPPDATA%\claude-rc-windows\logs\folders\<hash>.log` | Per-folder: starts, exits, exit codes, restarts, takeovers, prompt detections (not console output). Rolled at 1 MB, keep 2. |
 
-`<hash>` = first 16 hex chars of SHA-256 of the normalised path; the log's
-first line names the path.
+`<hash>` = first 16 hex chars (lower case) of SHA-256 of the UTF-8 normalised
+path; the first line of each folder log file is `# folder: <path>`. "Keep N"
+means N files in total, the current one included: a rolled file becomes
+`<name>.1`, older ones `<name>.2`, …. Each entry is one line,
+`<local ISO-8601 time> <message>`.
 
 ## 12. Security
 
