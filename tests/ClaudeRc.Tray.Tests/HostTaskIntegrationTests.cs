@@ -13,13 +13,15 @@ namespace ClaudeRc.Tray.Tests;
 /// Test task folders in the real Task Scheduler. Only folders named
 /// <c>\claude-rc-windows-test-&lt;guid&gt;</c> are ever created or deleted; the real
 /// <c>\claude-rc-windows\</c> is never touched. Leftovers of an earlier run are swept when the
-/// suite starts.
+/// suite starts, and again when the collection ends.
 /// </summary>
-public sealed class TestTaskFolders
+public sealed class TestTaskFolders : IDisposable
 {
     public const string Prefix = "claude-rc-windows-test-";
 
     public TestTaskFolders() => Sweep();
+
+    public void Dispose() => Sweep();
 
     /// <summary>A new folder path, <c>\claude-rc-windows-test-&lt;guid&gt;</c>.</summary>
     public static string NewFolder() => @"\" + Prefix + Guid.NewGuid().ToString("N");
@@ -262,7 +264,10 @@ public sealed class HostTaskIntegrationTests : IDisposable
             "--log-dir", Path.Combine(temp, "logs"),
             "--claude-json", Path.Combine(temp, "claude.json"),
         ];
-        var setup = new StartModeSetup(TaskPath, hostExe, hostArgs, Account);
+        // Enabled (it is run), but its logon trigger expires in a few minutes: a task that a killed
+        // test run left behind never starts a test host at a later logon.
+        var end = DateTimeOffset.Now.AddMinutes(10);
+        var setup = new StartModeSetup(TaskPath, hostExe, hostArgs, Account) { TriggerEndBoundary = end };
         var elevation = new FakeElevation { ExitCode = HelperExitCodes.Failed };
         var switcher = new StartModeSwitcher(_service, elevation, setup, (_, _) => ["never"], File.Exists, (d, ct) => Task.Delay(d, ct));
         var pipe = HostOptions.Parse(["--instance", instance], new HostDefaults("x", "x", "x", WindowsIdentity.GetCurrent().User!.Value)).PipeName;
@@ -273,6 +278,13 @@ public sealed class HostTaskIntegrationTests : IDisposable
             Assert.Equal(SwitchOutcome.Done, result.Outcome);
             Assert.Null(result.Message);
             Assert.Empty(elevation.Runs); // logon needed no elevation
+            using (var ts = new TaskService())
+            using (var registered = ts.GetTask(TaskPath))
+            {
+                var trigger = Assert.IsType<LogonTrigger>(Assert.Single(registered!.Definition.Triggers));
+                Assert.True(trigger.Enabled);
+                Assert.InRange(trigger.EndBoundary.ToUniversalTime(), end.UtcDateTime.AddSeconds(-1), end.UtcDateTime.AddSeconds(1));
+            }
             await AssertHostAnswers(pipe);
             Assert.True((await new HostTaskManager(_service, TaskPath).GetInfoAsync()).Running);
 

@@ -104,6 +104,9 @@ internal static class HelperExitCodes
 /// <param name="Account">The user, <c>DOMAIN\name</c>.</param>
 internal sealed record StartModeSetup(string TaskPath, string HostExe, IReadOnlyList<string> HostArguments, string Account)
 {
+    /// <summary>Only in tests: the trigger's expiry (<see cref="HostTaskSpec.TriggerEndBoundary"/>).</summary>
+    public DateTimeOffset? TriggerEndBoundary { get; init; }
+
     /// <summary>The task's definition for a mode.</summary>
     public HostTaskSpec Spec(StartMode mode) => new()
     {
@@ -112,6 +115,7 @@ internal sealed record StartModeSetup(string TaskPath, string HostExe, IReadOnly
         HostExe = HostExe,
         HostArguments = HostArguments,
         Account = Account,
+        TriggerEndBoundary = TriggerEndBoundary,
     };
 }
 

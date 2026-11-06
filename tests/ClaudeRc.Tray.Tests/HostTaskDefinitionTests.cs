@@ -117,6 +117,34 @@ public class HostTaskDefinitionTests
         Assert.Equal("false", Setting(root, "Enabled"));
     }
 
+    [Theory]
+    [InlineData("Logon")]
+    [InlineData("Startup")]
+    public void A_trigger_end_is_for_tests_only_and_written_before_enabled(string modeName)
+    {
+        var mode = Enum.Parse<StartMode>(modeName);
+        // Production: the trigger never expires.
+        var none = Assert.Single(Root(Spec(mode)).Element(Ns + "Triggers")!.Elements());
+        Assert.Null(none.Element(Ns + "EndBoundary"));
+
+        // A test task: its trigger expires, so a task left behind never starts at a later logon.
+        var end = new DateTimeOffset(2026, 11, 6, 14, 30, 5, TimeSpan.FromHours(1));
+        var trigger = Assert.Single(Root(Spec(mode) with { TriggerEndBoundary = end }).Element(Ns + "Triggers")!.Elements());
+        Assert.Equal("2026-11-06T13:30:05Z", trigger.Element(Ns + "EndBoundary")!.Value);
+        // Task Scheduler's schema order: StartBoundary, EndBoundary, Enabled.
+        Assert.Equal(Ns + "Enabled", trigger.Element(Ns + "EndBoundary")!.ElementsAfterSelf().First().Name);
+        Assert.Equal(mode, HostTaskDefinition.ReadMode(HostTaskDefinition.BuildXml(Spec(mode) with { TriggerEndBoundary = end })));
+    }
+
+    [Fact]
+    public void The_switch_setup_passes_a_test_trigger_end_on()
+    {
+        var end = DateTimeOffset.UtcNow.AddMinutes(5);
+        var setup = new StartModeSetup(@"\claude-rc-windows-t1\Host", Exe, [], Account) { TriggerEndBoundary = end };
+        Assert.Equal(end, setup.Spec(StartMode.Logon).TriggerEndBoundary);
+        Assert.Null(new StartModeSetup(@"\claude-rc-windows\Host", Exe, [], Account).Spec(StartMode.Logon).TriggerEndBoundary);
+    }
+
     [Fact]
     public void Description_says_what_the_task_is()
     {

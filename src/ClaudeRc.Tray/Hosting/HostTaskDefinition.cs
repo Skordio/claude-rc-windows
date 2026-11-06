@@ -24,6 +24,13 @@ internal sealed record HostTaskSpec
 
     /// <summary>False only in tests: a disabled task never starts by itself.</summary>
     public bool Enabled { get; init; } = true;
+
+    /// <summary>
+    /// Only in tests: when the trigger expires (<c>EndBoundary</c>), so an enabled test task that a
+    /// killed test run left behind never starts at a later logon or boot; it can still be run on
+    /// demand. Null in production: the trigger never expires.
+    /// </summary>
+    public DateTimeOffset? TriggerEndBoundary { get; init; }
 }
 
 /// <summary>The host task's XML (Task Scheduler schema 1.2), built and read without Task Scheduler.</summary>
@@ -58,9 +65,16 @@ internal static class HostTaskDefinition
             throw new ArgumentException("the task needs the user it runs as", nameof(spec));
         var logon = LogonFor(spec.Mode);
 
-        var trigger = spec.Mode == StartMode.Logon
-            ? new XElement(Ns + "LogonTrigger", new XElement(Ns + "Enabled", "true"), new XElement(Ns + "UserId", spec.Account))
-            : new XElement(Ns + "BootTrigger", new XElement(Ns + "Enabled", "true"));
+        var trigger = new XElement(Ns + (spec.Mode == StartMode.Logon ? "LogonTrigger" : "BootTrigger"));
+        if (spec.TriggerEndBoundary is { } end)
+        {
+            // Before Enabled (the schema's order). UTC, so no time zone can move it.
+            trigger.Add(new XElement(Ns + "EndBoundary",
+                end.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture)));
+        }
+        trigger.Add(new XElement(Ns + "Enabled", "true"));
+        if (spec.Mode == StartMode.Logon)
+            trigger.Add(new XElement(Ns + "UserId", spec.Account));
 
         var exec = new XElement(Ns + "Exec",
             // Always quoted: unquoted, a path with spaces could be read as C:\Users\Jo.exe.
