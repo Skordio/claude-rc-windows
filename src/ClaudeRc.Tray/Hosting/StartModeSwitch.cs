@@ -18,16 +18,6 @@ internal sealed class PromptedPassword(char[] password) : IDisposable
     /// <summary>Disposed (wiped).</summary>
     public bool IsDisposed { get; private set; }
 
-    /// <summary>
-    /// The password as a string, made only for the one Task Scheduler call that needs it (COM takes
-    /// a BSTR). The string cannot be wiped; it is never stored, logged or sent anywhere else.
-    /// </summary>
-    public string Reveal()
-    {
-        ObjectDisposedException.ThrowIf(IsDisposed, this);
-        return new string(password);
-    }
-
     /// <inheritdoc/>
     public void Dispose()
     {
@@ -307,13 +297,13 @@ internal sealed class StartModeHelper(ITaskService tasks, ICredentialPrompt prom
         return HelperExitCodes.NotRestarted;
     }
 
-    /// <summary>Registers the task. The password (if any) is revealed only for this one call.</summary>
+    /// <summary>Registers the task, handing Task Scheduler the password (if any); the caller wipes it right after.</summary>
     private bool TryRegister(StartModeSetup setup, string xml, PromptedPassword? password, TaskLogon logon, out bool logonFailed)
     {
         logonFailed = false;
         try
         {
-            tasks.Register(setup.TaskPath, xml, setup.Account, password?.Reveal(), logon);
+            tasks.Register(setup.TaskPath, xml, setup.Account, password, logon);
             return true;
         }
         catch (Exception e) when (e.HResult == HostTaskDefinition.LogonFailure && password is not null)

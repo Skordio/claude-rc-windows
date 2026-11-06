@@ -54,9 +54,10 @@ internal interface ITaskService
 
     /// <summary>
     /// Creates or replaces the task (creating its folder if needed). <paramref name="password"/> is
-    /// passed straight to Task Scheduler and is never kept, written or logged (SPEC 12).
+    /// passed straight to Task Scheduler (as a BSTR zeroed right after the call) and is never kept,
+    /// written or logged (SPEC 12); the caller wipes it afterwards.
     /// </summary>
-    void Register(string taskPath, string xml, string account, string? password, TaskLogon logon);
+    void Register(string taskPath, string xml, string account, PromptedPassword? password, TaskLogon logon);
 
     /// <summary>Deletes the task, and its folder when that is then empty; nothing when it does not exist.</summary>
     void Delete(string taskPath);
@@ -93,7 +94,8 @@ internal static class TaskPaths
 /// <remarks>
 /// Each call connects on its own (<see cref="Sched.TaskService"/> is cheap to create and not
 /// thread-safe). The definition is always the XML of <see cref="HostTaskDefinition"/>: the library
-/// only registers, reads, runs, stops and deletes.
+/// only creates folders, reads, runs, stops and deletes; the registration itself is
+/// <see cref="TaskSchedulerCom.Register"/>, so a password never becomes a .NET string.
 /// </remarks>
 internal sealed class WindowsTaskService : ITaskService
 {
@@ -119,13 +121,13 @@ internal sealed class WindowsTaskService : ITaskService
     }
 
     /// <inheritdoc/>
-    public void Register(string taskPath, string xml, string account, string? password, TaskLogon logon)
+    public void Register(string taskPath, string xml, string account, PromptedPassword? password, TaskLogon logon)
     {
         var (folderPath, name) = TaskPaths.Split(taskPath);
-        using var ts = new Sched.TaskService();
-        using var folder = GetOrCreateFolder(ts, folderPath);
-        var type = logon == TaskLogon.Password ? Sched.TaskLogonType.Password : Sched.TaskLogonType.InteractiveToken;
-        using var _ = folder.RegisterTask(name, xml, Sched.TaskCreation.CreateOrUpdate, account, password, type, null);
+        using (var ts = new Sched.TaskService())
+            GetOrCreateFolder(ts, folderPath).Dispose();
+        // Our own call, not the library's: the password goes in as a BSTR that is zeroed at once.
+        TaskSchedulerCom.Register(folderPath, name, xml, account, password, logon);
     }
 
     /// <inheritdoc/>

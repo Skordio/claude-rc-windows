@@ -301,9 +301,11 @@ internal sealed class FakeTaskService : ITaskService
         return Tasks.TryGetValue(taskPath, out var e) ? new TaskSnapshot(e.Xml, e.State, e.LastResult, e.LastRunTime, e.NextRunTime) : null;
     }
 
-    public void Register(string taskPath, string xml, string account, string? password, TaskLogon logon)
+    public void Register(string taskPath, string xml, string account, PromptedPassword? password, TaskLogon logon)
     {
-        Passwords.Add(password);
+        // A copy for the assertions (test only); the password must still be intact when handed over.
+        Assert.False(password?.IsDisposed ?? false, "the password was wiped before Register");
+        Passwords.Add(password is null ? null : new string(password.Chars));
         Enter("register", taskPath);
         // Updating a task leaves its running instance (and last result) as they are.
         var old = Tasks.GetValueOrDefault(taskPath);

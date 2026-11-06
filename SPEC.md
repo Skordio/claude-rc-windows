@@ -526,7 +526,8 @@ means N files in total, the current one included: a rolled file becomes
 - Paths are normalised and must be existing directories when added.
 - The Windows password for `startup` mode goes straight from the credential
   prompt to Task Scheduler. It is never written to disk, logged or sent over
-  the pipe.
+  the pipe, and never becomes a .NET string: it is held only in buffers that
+  are zeroed right after the registration call.
 - The elevated start-mode helper (9.2) registers only the fixed host task for
   a user account; other programs, arguments or accounts on its command line
   are refused.

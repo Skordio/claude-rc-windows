@@ -404,3 +404,50 @@ public class WindowsAccountsTests
         Assert.False(WindowsAccounts.IsUser(name));
     }
 }
+
+/// <summary>
+/// The password reaches Task Scheduler as a BSTR that is zeroed and freed right after the call
+/// (SPEC 12): never as a .NET string, which could not be wiped.
+/// </summary>
+public class PasswordHandlingTests
+{
+    [Fact]
+    public void A_prompted_password_never_becomes_a_string()
+    {
+        Assert.DoesNotContain(typeof(PromptedPassword).GetMethods(), m => m.ReturnType == typeof(string) && m.DeclaringType == typeof(PromptedPassword));
+        Assert.DoesNotContain(typeof(PromptedPassword).GetProperties(), p => p.PropertyType == typeof(string));
+    }
+
+    [Fact]
+    public void Task_scheduler_gets_the_password_as_a_bstr_of_its_characters()
+    {
+        using var password = new PromptedPassword("s3cret pässword".ToCharArray());
+
+        var bstr = TaskSchedulerCom.AllocBstr(password.Chars);
+        try
+        {
+            Assert.Equal(15, Marshal.ReadInt32(bstr, -4) / 2); // the BSTR's length prefix, in bytes
+            Assert.Equal("s3cret pässword", Marshal.PtrToStringBSTR(bstr));
+            Assert.Equal(0, Marshal.ReadInt16(bstr, 30)); // terminated
+        }
+        finally
+        {
+            Marshal.ZeroFreeBSTR(bstr);
+        }
+    }
+
+    [Fact]
+    public void An_empty_password_is_an_empty_bstr()
+    {
+        var bstr = TaskSchedulerCom.AllocBstr([]);
+        try
+        {
+            Assert.NotEqual(IntPtr.Zero, bstr);
+            Assert.Equal(0, Marshal.ReadInt32(bstr, -4));
+        }
+        finally
+        {
+            Marshal.ZeroFreeBSTR(bstr);
+        }
+    }
+}
