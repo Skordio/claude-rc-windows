@@ -42,7 +42,7 @@ internal sealed class FakeHostClient : IHostClient
             return Task.FromException<IpcResponse>(new IpcClosedException(_reason ?? "closed"));
         Requests.Enqueue(request);
         if (AsyncHandler is { } asyncHandler)
-            return WithId(asyncHandler(request), request.Id);
+            return WithId(asyncHandler(request).WaitAsync(cancellationToken), request.Id);
         var response = (Handler ?? Default)(request);
         return Task.FromResult(response with { Id = request.Id });
     }
@@ -83,11 +83,16 @@ internal sealed class FakeConnector : IHostConnector
 
     public int Attempts => Volatile.Read(ref _attempts);
 
+    /// <summary>When set, every attempt fails with it (e.g. a pipe that refuses the connection).</summary>
+    public Exception? Error { get; set; }
+
     public void Enqueue(FakeHostClient client) => _clients.Enqueue(client);
 
     public Task<IHostClient> ConnectAsync(CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _attempts);
+        if (Error is { } error)
+            return Task.FromException<IHostClient>(error);
         return _clients.TryDequeue(out var client)
             ? Task.FromResult<IHostClient>(client)
             : Task.FromException<IHostClient>(new TimeoutException("the host is not running"));

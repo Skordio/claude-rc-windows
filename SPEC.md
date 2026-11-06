@@ -438,7 +438,12 @@ be misread.
 ### 9.4 Single host
 The host takes a global named mutex `Global\claude-rc-windows-host-<user
 SID>`; a second instance exits at once. The tray app's **Start host** button
-runs the scheduled task (it never starts the host as its own child).
+runs the scheduled task (it never starts the host as its own child). If Task
+Scheduler refuses to run it for the user (a `startup` task an administrator
+made), it is run through a second elevated helper, `ClaudeRc.exe --run-host`
+(UAC, no password; it takes nothing but `--instance`, and runs the fixed task
+only if that task runs the `ClaudeRcHost.exe` next to it). The installer's
+`--install` does the same (14).
 Restarting the host through the task (3.4) stops the task's running instance,
 waits up to 10 s for that process to end, and only then runs the task: Task
 Scheduler reports the task stopped before the process is gone, and a host
@@ -508,6 +513,7 @@ running" and **Start host**.
 | `%APPDATA%\claude-rc-windows\settings.json` | `{"v":1,"claude_path":null,"notifications":true}` |
 | `%LOCALAPPDATA%\claude-rc-windows\logs\host.log` | Host events, rolled at 5 MB, keep 3. |
 | `%LOCALAPPDATA%\claude-rc-windows\logs\folders\<hash>.log` | Per-folder: starts, exits, exit codes, restarts, takeovers, prompt detections (not console output). Rolled at 1 MB, keep 2. |
+| `%LOCALAPPDATA%\claude-rc-windows\logs\setup.log` | Only from a silent install or uninstall (14): the errors of `ClaudeRc.exe`'s installer steps, which would otherwise be shown. Appended, not rolled. |
 | `%LOCALAPPDATA%\claude-rc-windows\webview2\` | The console viewer's WebView2 user data (browser cache and state; no console output is saved by the app). |
 
 `<hash>` = first 16 hex chars (lower case) of SHA-256 of the UTF-8 normalised
@@ -563,12 +569,20 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
   arm64): installs to
   `%LOCALAPPDATA%\Programs\claude-rc-windows`, Start menu shortcut, creates
   the `logon` task, starts the host and tray app. Uninstall: turns every
-  folder OFF (stops sessions), deletes the task, removes the toast
-  registration (3.5), removes the program and
+  folder OFF (stops sessions; the host saves them OFF), deletes the task,
+  removes the toast registration (3.5), removes the program and
   `%LOCALAPPDATA%\claude-rc-windows\webview2`; asks
   whether to keep `%APPDATA%\claude-rc-windows` and the logs
-  (`%LOCALAPPDATA%\claude-rc-windows\logs`; a silent uninstall keeps both).
+  (`%LOCALAPPDATA%\claude-rc-windows\logs`). A kept folder list has every
+  folder OFF after a later install (the question says so). A silent uninstall
+  (`/SILENT`, `/VERYSILENT`) keeps both without asking. When the task runs
+  another copy (the portable zip, see `--uninstall` below), nothing is asked
+  and that copy's data, logs and WebView2 folder are kept.
   Never touches `.claude.json`.
+  Setup refuses to run elevated ("Run as administrator", an elevated
+  terminal): with UAC on, its steps would inherit the administrator token,
+  and the task would be made with administrator rights (or for another
+  account). With UAC off there is no split token and Setup runs.
   The task, the host and the folders are handled by the installed
   `ClaudeRc.exe` itself, with three installer steps that take no path or
   account (only `--instance`), so the task is the same one the app builds (9):
@@ -577,12 +591,23 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
     again would need UAC and the password), another `startup` task becomes
     this copy's `startup` task through the elevated helper (9.2), anything else
     becomes this copy's `logon` task; then the running host is stopped and the
-    task run.
+    task run, through the `--run-host` helper (UAC, no password, 9.4) when Task
+    Scheduler refuses the user the kept administrator-made `startup` task.
   - `--stop-for-update`, before an upgrade replaces the files: the running
     tray quits and the host is stopped (its sessions end with it, 6.5; the
     ON folders start again when `--install` runs the task).
   - `--uninstall`: as above. A task that runs another copy's `ClaudeRcHost.exe`
-    (the portable zip) is left alone, with its host and folders.
+    (the portable zip) is left alone, with its host and folders; the exit code
+    (3) tells the uninstaller to keep the data. The folders are turned OFF
+    within 45 s (15 s for the sessions to stop, 30 s more for a slow host); a
+    host that does not answer by then, or a pipe that refuses the connection,
+    is reported and the uninstall goes on (the host is stopped, its sessions
+    end with it).
+
+  Each step takes `--quiet`, which the installer passes only in a silent
+  install or uninstall: the errors go to `logs\setup.log` (11) instead of a
+  message box, so nothing waits for a click. UAC and the elevated helpers'
+  own messages still appear.
 
   Stopping the host = stopping the task's running instance, then ending any
   process still running this copy's `ClaudeRcHost.exe` (a stop Task Scheduler
@@ -611,7 +636,7 @@ Supported OS: Windows 10 1809+ (ConPTY) and Windows 11.
 Update check, per-folder options, auto-update, signing, multiple users per
 host, running folders as another account, a CLI. Each is a separate issue
 when wanted. (`ClaudeRc.exe` takes a few internal options for the elevated
-helper, 9.2, and the installer, 14; they are not a CLI.)
+helpers, 9.2 and 9.4, and the installer, 14; they are not a CLI.)
 
 ## 16. Milestones
 

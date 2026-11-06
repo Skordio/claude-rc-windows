@@ -369,6 +369,61 @@ public class StartModeHelperTests
         Assert.Contains(Account, Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
     }
 
+    // ---- --run-host: run the task an administrator made, no password (SPEC 9.4) ----
+
+    [Fact]
+    public void Run_host_runs_the_task_of_this_host_and_changes_nothing_else()
+    {
+        _tasks.Add(TaskPath, StartMode.Startup); // runs C:\app\ClaudeRcHost.exe
+
+        Assert.Equal(HelperExitCodes.Ok, _helper.RunHost(Setup));
+
+        Assert.Contains($"run {TaskPath}", _tasks.Calls);
+        Assert.DoesNotContain(_tasks.Calls, c => c.StartsWith("register", StringComparison.Ordinal)
+            || c.StartsWith("stop", StringComparison.Ordinal) || c.StartsWith("delete", StringComparison.Ordinal));
+        Assert.Empty(_prompt.Prompts);
+        Assert.Empty(_dialogs.Errors);
+    }
+
+    [Fact]
+    public void Run_host_refuses_a_task_that_runs_another_program()
+    {
+        _tasks.Tasks[TaskPath] = new FakeTaskService.Entry
+        {
+            Xml = HostTaskDefinition.BuildXml(new HostTaskSpec
+            {
+                TaskPath = TaskPath, Mode = StartMode.Logon, HostExe = @"D:\elsewhere\ClaudeRcHost.exe", Account = Account,
+            }),
+            Account = Account,
+            Logon = TaskLogon.InteractiveToken,
+        };
+
+        Assert.Equal(HelperExitCodes.Failed, _helper.RunHost(Setup));
+
+        Assert.DoesNotContain(_tasks.Calls, c => c.StartsWith("run", StringComparison.Ordinal));
+        Assert.Contains(@"D:\elsewhere\ClaudeRcHost.exe", Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Run_host_with_no_task_says_so()
+    {
+        Assert.Equal(HelperExitCodes.Failed, _helper.RunHost(Setup));
+
+        Assert.DoesNotContain(_tasks.Calls, c => c.StartsWith("run", StringComparison.Ordinal));
+        Assert.Contains("does not exist", Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Run_host_shows_task_schedulers_error()
+    {
+        _tasks.Add(TaskPath, StartMode.Startup);
+        _tasks.FailNext("run", new COMException("The task is disabled.", unchecked((int)0x80041326)));
+
+        Assert.Equal(HelperExitCodes.Failed, _helper.RunHost(Setup));
+
+        Assert.Contains("The task is disabled.", Assert.Single(_dialogs.Errors).Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Exit_codes_are_stable()
     {

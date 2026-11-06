@@ -52,6 +52,12 @@ internal partial class App
         }
         catch (ArgumentException ex)
         {
+            // A silent install never waits for a click, even when an older ClaudeRc.exe does not know its arguments.
+            if (e.Args.Contains("--quiet", StringComparer.Ordinal))
+            {
+                Shutdown(2);
+                return;
+            }
             MessageBox.Show(ex.Message + "\n\nusage: ClaudeRc.exe [--instance <suffix>] [--host-exe <path>] [--unregister-notifications]", "claude-rc-windows",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             Shutdown(2);
@@ -62,6 +68,13 @@ internal partial class App
         {
             // The installer's steps (SPEC 14): no tray, no window of their own; they exit with their result.
             RunSetup(options, setup, account);
+            return;
+        }
+
+        if (options.RunHost)
+        {
+            // The elevated run-host helper (SPEC 9.4): runs the fixed task, shows its own errors, exits with its result.
+            RunHostHelper(options, account);
             return;
         }
 
@@ -104,7 +117,7 @@ internal partial class App
         var time = TimeProvider.System;
         var dialogs = new WpfDialogs();
         var tasks = new WindowsTaskService();
-        var task = new HostTaskManager(tasks, options.TaskPath);
+        var task = new HostTaskManager(tasks, options.TaskPath, ElevatedRun(options));
         var switcher = new StartModeSwitcher(tasks,
             new ShellElevation(Environment.ProcessPath ?? throw new InvalidOperationException("no process path")),
             new StartModeSetup(options.TaskPath, options.HostExe, options.HostArguments, account),
@@ -172,13 +185,42 @@ internal partial class App
     }
 
     /// <summary>
+    /// <c>--run-host</c>: the elevated helper the tray (or the installer's <c>--install</c>) starts with
+    /// UAC when Task Scheduler refuses to run the task for the user (SPEC 9.4). It only runs the fixed
+    /// task, and only when that runs the host next to this exe; no password.
+    /// </summary>
+    private void RunHostHelper(TrayOptions options, string account)
+    {
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        var dialogs = new WpfDialogs();
+        var code = HelperExitCodes.Failed;
+        try
+        {
+            var helper = new StartModeHelper(new WindowsTaskService(), new CredUiPrompt(), dialogs, File.Exists, WindowsAccounts.IsUser,
+                (delay, ct) => Task.Delay(delay, ct));
+            code = helper.RunHost(new StartModeSetup(options.TaskPath, options.AppHostExe, [], account));
+        }
+#pragma warning disable CA1031 // The helper reports anything that goes wrong and exits.
+        catch (Exception e)
+#pragma warning restore CA1031
+        {
+            dialogs.ShowError("Start host", "The host could not be started: " + e.Message);
+        }
+        finally
+        {
+            Shutdown(code);
+        }
+    }
+
+    /// <summary>
     /// <c>--install</c>, <c>--stop-for-update</c>, <c>--uninstall</c>: the installer's steps
-    /// (<see cref="AppSetup"/>). They show their own errors and exit with a <see cref="SetupExitCodes"/> value.
+    /// (<see cref="AppSetup"/>). They show their own errors (with <c>--quiet</c>, a silent install:
+    /// write them to the setup log) and exit with a <see cref="SetupExitCodes"/> value.
     /// </summary>
     private async void RunSetup(TrayOptions options, SetupAction action, string account)
     {
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
-        var dialogs = new WpfDialogs();
+        IDialogs dialogs = options.Quiet ? new SetupLogDialogs(options.SetupLogPath, TimeProvider.System) : new WpfDialogs();
         var code = SetupExitCodes.Failed;
         try
         {
@@ -187,7 +229,8 @@ internal partial class App
             var switcher = new StartModeSwitcher(tasks,
                 new ShellElevation(Environment.ProcessPath ?? throw new InvalidOperationException("no process path")),
                 setup, (m, restart) => options.HelperArguments(m, account, restart), File.Exists, (delay, ct) => Task.Delay(delay, ct));
-            var appSetup = new AppSetup(tasks, switcher, new PipeHostConnector(options.PipeName),
+            var appSetup = new AppSetup(tasks, switcher, new HostTaskManager(tasks, options.TaskPath, ElevatedRun(options)),
+                new PipeHostConnector(options.PipeName),
                 new WindowsRunningTray(options.MutexName, options.QuitEventName), new WindowsProcessStopper(),
                 ToolkitToastNotifier.Unregister, dialogs, setup,
                 Path.Combine(Path.GetDirectoryName(options.AppHostExe)!, "ClaudeRc.exe"), (delay, ct) => Task.Delay(delay, ct));
@@ -204,6 +247,11 @@ internal partial class App
             Shutdown(code);
         }
     }
+
+    /// <summary>Runs the host's task through the elevated <c>--run-host</c> helper when Task Scheduler refuses the user (SPEC 9.4).</summary>
+    private static ElevatedHostRun ElevatedRun(TrayOptions options) =>
+        new(new ShellElevation(Environment.ProcessPath ?? throw new InvalidOperationException("no process path")), options.TaskPath,
+            options.RunHostArguments());
 
     private TaskbarIcon CreateTrayIcon(string? instance)
     {

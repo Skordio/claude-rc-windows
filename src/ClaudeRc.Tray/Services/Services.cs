@@ -131,3 +131,44 @@ internal static class FolderPaths
     /// <summary><see cref="IsNetworkPath(string, Func{string, DriveType})"/> with the real drive types.</summary>
     public static bool IsNetworkPath(string path) => IsNetworkPath(path, root => new DriveInfo(root).DriveType);
 }
+
+/// <summary>
+/// <see cref="IDialogs"/> for a silent install's steps (<c>--quiet</c>): messages are appended to
+/// the setup log, one line each, and nothing is ever asked or shown.
+/// </summary>
+/// <param name="path">The log file (<see cref="TrayOptions.SetupLogPath"/>).</param>
+/// <param name="time">The clock.</param>
+internal sealed class SetupLogDialogs(string path, TimeProvider time) : IDialogs
+{
+    /// <summary>Nothing is asked: No.</summary>
+    public bool Confirm(string title, string message) => false;
+
+    /// <inheritdoc/>
+    public void ShowError(string title, string message) => Write(title, message);
+
+    /// <inheritdoc/>
+    public void ShowInfo(string title, string message) => Write(title, message);
+
+    /// <summary>Nothing is picked.</summary>
+    public string? PickFolder() => null;
+
+    /// <summary>Nothing is picked.</summary>
+    public string? PickClaudeExecutable(string? current) => null;
+
+    /// <summary>One line per message (SPEC 11): <c>&lt;local ISO-8601 time&gt; &lt;title&gt;: &lt;message&gt;</c>.</summary>
+    private void Write(string title, string message)
+    {
+        var text = string.Join(' ', message.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        var stamp = time.GetLocalNow().ToString("yyyy-MM-dd'T'HH:mm:ss.fffzzz", System.Globalization.CultureInfo.InvariantCulture);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.AppendAllText(path, $"{stamp} {title}: {text}{Environment.NewLine}");
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // A silent install must not stop on its own log; the exit code still says it failed.
+            Trace.TraceWarning($"setup log {path}: {e.Message}");
+        }
+    }
+}

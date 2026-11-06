@@ -85,18 +85,90 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{ap
 
 [Run]
 ; Sets up the logon task for this copy (a startup task that already runs it is kept), stops any
-; running host and runs the task. Errors are shown by ClaudeRc.exe itself.
-Filename: "{app}\{#AppExe}"; Parameters: "--install"; StatusMsg: "Setting up the scheduled task and starting the host..."; Flags: waituntilterminated
+; running host and runs the task. Errors are shown by ClaudeRc.exe itself; in a silent install
+; (--quiet) they go to %LOCALAPPDATA%\claude-rc-windows\logs\setup.log instead.
+Filename: "{app}\{#AppExe}"; Parameters: "--install{code:QuietArg}"; StatusMsg: "Setting up the scheduled task and starting the host..."; Flags: waituntilterminated
 ; The tray app. Not skipped in silent mode, so a silent upgrade brings it back too.
 Filename: "{app}\{#AppExe}"; Description: "Open {#AppName}"; Flags: nowait postinstall
 
-[UninstallRun]
-; Every folder OFF (stops the sessions), tray and host ended, task deleted, toast registration removed.
-Filename: "{app}\{#AppExe}"; Parameters: "--uninstall"; RunOnceId: "Cleanup"; Flags: waituntilterminated
+; No [UninstallRun]: ClaudeRc.exe --uninstall is run from CurUninstallStepChanged below, so its
+; exit code is known before the keep-data question.
 
 [Code]
+const
+  { ClaudeRc.exe --uninstall: the task runs another copy (the portable zip), left alone (SetupExitCodes.OtherCopy). }
+  SetupOtherCopy = 3;
+  TOKEN_QUERY = $0008;
+  { TOKEN_INFORMATION_CLASS TokenElevationType and its TokenElevationTypeFull. }
+  TokenElevationTypeClass = 18;
+  TokenElevationTypeFull = 2;
+
 var
   KeepData: Boolean;
+  KeepWebView: Boolean;
+
+function OpenProcessToken(ProcessHandle: THandle; DesiredAccess: DWORD; var TokenHandle: THandle): BOOL;
+  external 'OpenProcessToken@advapi32.dll stdcall';
+function GetTokenInformation(TokenHandle: THandle; TokenInformationClass: Integer; var TokenInformation: DWORD;
+  TokenInformationLength: DWORD; var ReturnLength: DWORD): BOOL;
+  external 'GetTokenInformation@advapi32.dll stdcall';
+function GetCurrentProcess: THandle;
+  external 'GetCurrentProcess@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+{ Setup runs with an elevated UAC token ("Run as administrator", an elevated terminal, winget from
+  one). [Run] entries and Exec() would inherit it, and runasoriginaluser can't drop it when Setup did
+  not elevate itself: the task would be registered from an administrator's token (or for another
+  account), so changing it later would need UAC. With UAC off there is no split token and nothing to
+  drop, so IsAdmin alone does not stop Setup. }
+function RunsElevated: Boolean;
+var
+  Token: THandle;
+  ElevationType, Size: DWORD;
+begin
+  Result := False;
+  if not IsAdmin() then
+    Exit;
+  if not OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, Token) then
+  begin
+    Result := True;
+    Exit;
+  end;
+  try
+    ElevationType := 0;
+    if GetTokenInformation(Token, TokenElevationTypeClass, ElevationType, 4, Size) then
+      Result := ElevationType = TokenElevationTypeFull
+    else
+      Result := True;
+  finally
+    CloseHandle(Token);
+  end;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  Result := True;
+  if RunsElevated() then
+  begin
+    Log('Setup runs elevated (an administrator token); a per-user install must run as the user. Stopped.');
+    if not WizardSilent() then
+      MsgBox('{#AppName} installs for your own account and needs no administrator rights, ' +
+        'but this Setup was started as an administrator (Run as administrator, or from an elevated ' +
+        'terminal). Its scheduled task would then be made with administrator rights.' + #13#10#13#10 +
+        'Run the installer again normally (double-click it).', mbError, MB_OK);
+    Result := False;
+  end;
+end;
+
+{ --quiet in a silent install: ClaudeRc.exe writes its errors to the setup log instead of showing a box. }
+function QuietArg(Param: String): String;
+begin
+  if WizardSilent() then
+    Result := ' --quiet'
+  else
+    Result := '';
+end;
 
 { An upgrade: the installed ClaudeRc.exe ends the running tray and host, so their files can be
   replaced. The ON folders start again when --install runs the task afterwards. }
@@ -109,7 +181,7 @@ begin
   Exe := ExpandConstant('{app}\{#AppExe}');
   if FileExists(Exe) then
   begin
-    if not Exec(Exe, '--stop-for-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewWaitUntilTerminated, Code) then
+    if not Exec(Exe, '--stop-for-update' + QuietArg(''), ExpandConstant('{app}'), SW_SHOWNORMAL, ewWaitUntilTerminated, Code) then
       Log('Could not run ' + Exe + ' --stop-for-update: ' + SysErrorMessage(Code))
     else
       Log(Exe + ' --stop-for-update ended with code ' + IntToStr(Code));
@@ -117,21 +189,52 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Exe, Params: String;
+  Code: Integer;
+  OtherCopy: Boolean;
 begin
   if CurUninstallStep = usUninstall then
   begin
-    { Asked before anything is removed. Silent uninstalls keep the data. Never touches .claude.json. }
-    KeepData := SuppressibleMsgBox(
-      'Keep your folder list, settings and logs?' + #13#10#13#10 +
-      ExpandConstant('{userappdata}\{#AppName}') + #13#10 +
-      ExpandConstant('{localappdata}\{#AppName}\logs') + #13#10#13#10 +
-      'Yes keeps them for a later install. No deletes them.',
-      mbConfirmation, MB_YESNO, IDYES) = IDYES;
+    { Before anything is removed: every saved ON folder OFF (stops the sessions; the list keeps
+      them OFF), tray and host ended, task deleted, toast registration removed. }
+    OtherCopy := False;
+    Exe := ExpandConstant('{app}\{#AppExe}');
+    Params := '--uninstall';
+    if UninstallSilent() then
+      Params := Params + ' --quiet';
+    if not Exec(Exe, Params, ExpandConstant('{app}'), SW_SHOWNORMAL, ewWaitUntilTerminated, Code) then
+      Log('Could not run ' + Exe + ' ' + Params + ': ' + SysErrorMessage(Code))
+    else
+    begin
+      Log(Exe + ' ' + Params + ' ended with code ' + IntToStr(Code));
+      OtherCopy := Code = SetupOtherCopy;
+    end;
+
+    { Never touches .claude.json. The task runs another copy (the portable zip): that copy still
+      uses the data, so it is kept without asking. A silent uninstall keeps it too. }
+    KeepWebView := OtherCopy;
+    if OtherCopy then
+    begin
+      Log('The task runs another copy of {#AppName}; its folder list, settings, logs and console viewer data are kept.');
+      KeepData := True;
+    end
+    else if UninstallSilent() then
+      KeepData := True
+    else
+      KeepData := MsgBox(
+        'Keep your folder list, settings and logs?' + #13#10#13#10 +
+        ExpandConstant('{userappdata}\{#AppName}') + #13#10 +
+        ExpandConstant('{localappdata}\{#AppName}\logs') + #13#10#13#10 +
+        'Yes keeps them for a later install. Every folder in the list stays OFF until you turn it ' +
+        'on again. No deletes them.',
+        mbConfirmation, MB_YESNO) = IDYES;
   end
   else if CurUninstallStep = usPostUninstall then
   begin
-    { The console viewer's WebView2 data always goes (SPEC 14). }
-    DelTree(ExpandConstant('{localappdata}\{#AppName}\webview2'), True, True, True);
+    { The console viewer's WebView2 data goes (SPEC 14), unless another copy still uses it. }
+    if not KeepWebView then
+      DelTree(ExpandConstant('{localappdata}\{#AppName}\webview2'), True, True, True);
     if KeepData then
       RemoveDir(ExpandConstant('{localappdata}\{#AppName}'))
     else

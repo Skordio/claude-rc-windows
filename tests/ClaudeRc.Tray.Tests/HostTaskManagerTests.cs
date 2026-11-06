@@ -141,4 +141,85 @@ public class HostTaskManagerTests
         Assert.Contains(Path, result.Error, StringComparison.Ordinal);
         Assert.Contains("Access is denied.", result.Error, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task A_run_task_scheduler_refuses_goes_through_the_elevated_helper()
+    {
+        // An administrator-made startup task: the user may not run it unelevated (SPEC 9.4).
+        var elevation = new FakeElevation { OnRun = _ => _tasks.Tasks[Path].State = TaskRunState.Running };
+        var manager = new HostTaskManager(_tasks, Path, new ElevatedHostRun(elevation, Path, ["--run-host"]));
+        _tasks.Add(Path, StartMode.Startup);
+        _tasks.FailNext("run", new UnauthorizedAccessException("Access is denied."));
+
+        var result = await manager.RunAsync();
+
+        Assert.True(result.Ok, result.Error);
+        Assert.Equal(["--run-host"], Assert.Single(elevation.Runs));
+    }
+
+    [Fact]
+    public async Task Other_run_errors_do_not_go_through_the_elevated_helper()
+    {
+        var elevation = new FakeElevation();
+        var manager = new HostTaskManager(_tasks, Path, new ElevatedHostRun(elevation, Path, ["--run-host"]));
+        _tasks.Add(Path, StartMode.Logon);
+        _tasks.FailNext("run", new COMException("The service is not available", unchecked((int)0x80070426)));
+
+        var result = await manager.RunAsync();
+
+        Assert.False(result.Ok);
+        Assert.Contains("The service is not available", result.Error, StringComparison.Ordinal);
+        Assert.Empty(elevation.Runs);
+    }
+}
+
+/// <summary>Running the host's task through the elevated helper (<c>ClaudeRc.exe --run-host</c>, SPEC 9.4).</summary>
+public class ElevatedHostRunTests
+{
+    private const string Path = @"\claude-rc-windows\Host";
+    private readonly FakeElevation _elevation = new();
+
+    [Fact]
+    public async Task The_helper_is_run_with_its_arguments()
+    {
+        var result = await new ElevatedHostRun(_elevation, Path, ["--run-host", "--instance", "t1"]).RunAsync();
+
+        Assert.True(result.Ok);
+        Assert.Equal(["--run-host", "--instance", "t1"], Assert.Single(_elevation.Runs));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(HelperExitCodes.Cancelled)]
+    public async Task No_at_uac_is_cancelled(int? code)
+    {
+        _elevation.ExitCode = code;
+
+        var result = await new ElevatedHostRun(_elevation, Path, ["--run-host"]).RunAsync();
+
+        Assert.False(result.Ok);
+        Assert.Contains("Cancelled", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_failed_helper_says_it_showed_why()
+    {
+        _elevation.ExitCode = HelperExitCodes.Failed;
+
+        var result = await new ElevatedHostRun(_elevation, Path, ["--run-host"]).RunAsync();
+
+        Assert.False(result.Ok);
+        Assert.Contains("code 1", result.Error, StringComparison.Ordinal);
+        Assert.Contains(Path, result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task No_helper_arguments_is_refused_without_uac()
+    {
+        var result = await new ElevatedHostRun(_elevation, Path, null).RunAsync();
+
+        Assert.False(result.Ok);
+        Assert.Contains("administrator", result.Error, StringComparison.Ordinal);
+        Assert.Empty(_elevation.Runs);
+    }
 }

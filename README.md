@@ -45,7 +45,11 @@ Windows on Arm), and `SHA256SUMS.txt`.
 rights. It installs to `%LOCALAPPDATA%\Programs\claude-rc-windows`, adds a Start menu shortcut,
 creates the scheduled task (start at logon), starts the host and opens the app. Running a newer
 installer upgrades in place: it closes the app and stops the host (your ON folders stop), replaces
-the files, and starts them again; a start-at-startup setup is kept.
+the files, and starts them again; a start-at-startup setup is kept (starting its task may need
+administrator approval, UAC, but not your password). Run the installer normally, not "as
+administrator": Setup stops if it was started elevated, because the scheduled task would then be
+made with administrator rights. A silent install (`/SILENT` or `/VERYSILENT`) shows no error
+messages; they go to `%LOCALAPPDATA%\claude-rc-windows\logs\setup.log`.
 
 **Portable** (`claude-rc-windows-<version>-win-x64-portable.zip`): unzip anywhere you can keep
 it and run `ClaudeRc.exe`. The first time (and each time it finds no scheduled task) it offers
@@ -100,7 +104,7 @@ starts again.
 |---|---|
 | Program (installer) | `%LOCALAPPDATA%\Programs\claude-rc-windows` |
 | Folder list and settings | `%APPDATA%\claude-rc-windows` (`folders.json`, `settings.json`) |
-| Logs | `%LOCALAPPDATA%\claude-rc-windows\logs` (`host.log`; `folders\*.log` per folder: starts, exits, restarts, take overs, prompts, never console output) |
+| Logs | `%LOCALAPPDATA%\claude-rc-windows\logs` (`host.log`; `folders\*.log` per folder: starts, exits, restarts, take overs, prompts, never console output; `setup.log` only after a silent install's errors) |
 | Console viewer data | `%LOCALAPPDATA%\claude-rc-windows\webview2` |
 | Scheduled task | `\claude-rc-windows\Host` in Task Scheduler |
 | Claude's own settings | `%USERPROFILE%\.claude.json`: the app only sets `hasTrustDialogAccepted` and, when missing, `remoteControlSpawnMode` for your folders |
@@ -112,7 +116,10 @@ Settings shows the data and log folders, the host's version and the task's statu
 **Settings > Apps > Installed apps > claude-rc-windows > Uninstall**. It turns every folder OFF
 (stopping their sessions), closes the app, stops the host, deletes the scheduled task, removes the app's notification registration, the program and the
 console viewer's data, and asks whether to keep your folder list, settings and logs (Yes keeps them
-for a later install). It never changes `.claude.json`. A task set up for "at startup" was made with
+for a later install, with every folder OFF: turn them on again after installing). A silent
+uninstall keeps them without asking. If the scheduled task runs another copy (you moved to the
+portable zip), that copy's task, host, folders and data are left alone and nothing is asked. It
+never changes `.claude.json`. A task set up for "at startup" was made with
 administrator rights; if the uninstall can't delete it, it says so, and you can delete
 `\claude-rc-windows\Host` in Task Scheduler.
 

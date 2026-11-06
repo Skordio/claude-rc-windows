@@ -8,7 +8,8 @@ namespace ClaudeRc.Tray;
 /// <c>[--instance &lt;suffix&gt;] [-ToastActivated] [--unregister-notifications] [--host-exe &lt;path&gt;] [--host-arg &lt;arg&gt;]…</c>,
 /// and for the elevated start-mode helper (SPEC 9.2)
 /// <c>--set-start-mode logon|startup --for-user &lt;DOMAIN\name&gt; [--restart-host]</c>, and for the installer
-/// (SPEC 14) <c>--install</c>, <c>--stop-for-update</c> or <c>--uninstall</c>. The instance suffix is
+/// (SPEC 14) <c>--install</c>, <c>--stop-for-update</c> or <c>--uninstall</c> (each optionally
+/// <c>--quiet</c>), and for the elevated run-host helper (SPEC 9.4) <c>--run-host</c>. The instance suffix is
 /// added to the pipe name (so it meets the host started with the same <c>--instance</c>), to the
 /// single-instance names, and to the scheduled task folder, so a test tray never runs the real task.
 /// </summary>
@@ -48,6 +49,15 @@ internal sealed record TrayOptions
 
     /// <summary><c>--install</c>, <c>--stop-for-update</c> or <c>--uninstall</c>: run that installer step (SPEC 14), then exit.</summary>
     public SetupAction? Setup { get; init; }
+
+    /// <summary><c>--quiet</c> (only with a setup step): its errors go to <see cref="SetupLogPath"/> instead of a message box.</summary>
+    public bool Quiet { get; init; }
+
+    /// <summary>Where a quiet setup step writes its errors: <c>%LOCALAPPDATA%\claude-rc-windows[-instance]\logs\setup.log</c>.</summary>
+    public string SetupLogPath { get; init; } = "";
+
+    /// <summary><c>--run-host</c>: the elevated helper that only runs the fixed task (SPEC 9.4), then exits.</summary>
+    public bool RunHost { get; init; }
 
     /// <summary>The host's scheduled task (SPEC 9): <c>\claude-rc-windows[-instance]\Host</c>.</summary>
     public required string TaskPath { get; init; }
@@ -110,6 +120,15 @@ internal sealed record TrayOptions
         return args;
     }
 
+    /// <summary>The arguments of the elevated <c>--run-host</c> helper; null when it would refuse this app's task.</summary>
+    /// <remarks>Only the instance: the helper runs the fixed task, and only when it runs the host next to it.</remarks>
+    public IReadOnlyList<string>? RunHostArguments()
+    {
+        if (!SamePath(HostExe, AppHostExe))
+            return null;
+        return Instance is null ? ["--run-host"] : ["--run-host", "--instance", Instance];
+    }
+
     /// <summary>The host options a test instance's task may pass (each once): its own suffix and its folders.</summary>
     private static readonly string[] HelperHostOptions = ["--instance", "--data-dir", "--log-dir", "--claude-json"];
 
@@ -170,7 +189,7 @@ internal sealed record TrayOptions
         string? instance = null, hostExe = null, forUser = null;
         StartMode? setMode = null;
         List<string>? hostArgs = null;
-        bool toastActivated = false, unregister = false, restartHost = false;
+        bool toastActivated = false, unregister = false, restartHost = false, quiet = false, runHost = false;
         SetupAction? setup = null;
         string? other = null;
         for (var i = 0; i < args.Count; i++)
@@ -183,7 +202,7 @@ internal sealed record TrayOptions
                 return args[++i];
             }
 
-            if (arg is not ("--install" or "--stop-for-update" or "--uninstall" or "--instance")
+            if (arg is not ("--install" or "--stop-for-update" or "--uninstall" or "--instance" or "--quiet" or "--run-host")
                 && !arg.StartsWith("--instance=", StringComparison.Ordinal))
             {
                 other ??= arg;
@@ -199,6 +218,12 @@ internal sealed record TrayOptions
                         "--stop-for-update" => SetupAction.StopForUpdate,
                         _ => SetupAction.Uninstall,
                     };
+                    break;
+                case "--quiet":
+                    quiet = true;
+                    break;
+                case "--run-host":
+                    runHost = true;
                     break;
                 case "--instance":
                     instance = Value();
@@ -242,8 +267,13 @@ internal sealed record TrayOptions
         }
         if (setMode is not null && forUser is null)
             throw new ArgumentException("--set-start-mode needs --for-user");
-        if (setup is not null && other is not null)
-            throw new ArgumentException($"the installer's steps take only --instance, not {other}");
+        if (setup is not null && (other is not null || runHost))
+            throw new ArgumentException($"the installer's steps take only --instance and --quiet, not {other ?? "--run-host"}");
+        if (quiet && setup is null)
+            throw new ArgumentException("--quiet goes only with --install, --stop-for-update or --uninstall");
+        // The elevated run-host helper: an untrusted command line, so nothing but the fixed task.
+        if (runHost && other is not null)
+            throw new ArgumentException($"--run-host takes only --instance, not {other}");
 
         // The host's own parser checks the suffix and builds the pipe name, so both always agree.
         var host = HostOptions.Parse(instance is null ? [] : ["--instance", instance],
@@ -289,6 +319,9 @@ internal sealed record TrayOptions
             ForUser = forUser,
             RestartHost = restartHost,
             Setup = setup,
+            Quiet = quiet,
+            SetupLogPath = Path.Combine(local, Product + suffix, "logs", "setup.log"),
+            RunHost = runHost,
         };
     }
 }

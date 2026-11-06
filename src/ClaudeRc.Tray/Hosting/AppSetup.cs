@@ -31,6 +31,9 @@ internal static class SetupExitCodes
 
     /// <summary>Bad arguments.</summary>
     public const int InvalidArguments = 2;
+
+    /// <summary><c>--uninstall</c> left the task alone: it runs another copy (the portable zip), whose data stays.</summary>
+    public const int OtherCopy = 3;
 }
 
 /// <summary>The tray app running in this logon session (for the same <c>--instance</c>).</summary>
@@ -61,6 +64,7 @@ internal interface IProcessStopper
 /// </summary>
 /// <param name="tasks">Task Scheduler.</param>
 /// <param name="switcher">Sets up the task (<see cref="StartModeSwitcher"/>: logon without admin, startup through the elevated helper).</param>
+/// <param name="hostTask">Runs the task (<see cref="HostTaskManager"/>: through the elevated <c>--run-host</c> helper when Task Scheduler refuses).</param>
 /// <param name="host">The host's pipe.</param>
 /// <param name="tray">The running tray app.</param>
 /// <param name="processes">Ends this copy's exes.</param>
@@ -69,7 +73,7 @@ internal interface IProcessStopper
 /// <param name="setup">The task, this copy's host and the user.</param>
 /// <param name="trayExe">This copy's ClaudeRc.exe.</param>
 /// <param name="delay">Waits (tests pass a no-op).</param>
-internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, IHostConnector host, IRunningTray tray,
+internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, IHostTask hostTask, IHostConnector host, IRunningTray tray,
     IProcessStopper processes, Action unregisterNotifications, IDialogs dialogs, StartModeSetup setup, string trayExe,
     Func<TimeSpan, CancellationToken, Task> delay)
 {
@@ -88,15 +92,26 @@ internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, 
     /// <summary>How often it looks.</summary>
     public static readonly TimeSpan Poll = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>How long the host may take to answer the uninstall's requests, on top of <see cref="SessionsStopTimeout"/>.</summary>
+    public static readonly TimeSpan HostAnswerTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>The longest the uninstall talks to the host before it goes on without it.</summary>
+    public static readonly TimeSpan DefaultTurnOffTimeout = SessionsStopTimeout + HostAnswerTimeout;
+
+    /// <summary>The longest the uninstall talks to the host (tests make it short).</summary>
+    public TimeSpan TurnOffTimeout { get; init; } = DefaultTurnOffTimeout;
+
     /// <summary>Attempts to reach the host's pipe.</summary>
     public const int ConnectAttempts = 3;
 
     private readonly List<string> _errors = [];
+    private bool _otherCopy;
 
     /// <summary>Runs one action; returns a <see cref="SetupExitCodes"/> value.</summary>
     public async Task<int> RunAsync(SetupAction action, CancellationToken cancellationToken = default)
     {
         _errors.Clear();
+        _otherCopy = false;
         // Back on the caller's context (the app's UI thread) after each step, so the message below is shown there.
         switch (action)
         {
@@ -113,10 +128,12 @@ internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, 
             default:
                 throw new ArgumentOutOfRangeException(nameof(action), action, null);
         }
-        if (_errors.Count == 0)
-            return SetupExitCodes.Ok;
-        dialogs.ShowError(Title, string.Join("\n\n", _errors));
-        return SetupExitCodes.Failed;
+        if (_errors.Count > 0)
+            dialogs.ShowError(Title, string.Join("\n\n", _errors));
+        // The uninstaller keeps another copy's data without asking, whatever else went wrong.
+        if (_otherCopy)
+            return SetupExitCodes.OtherCopy;
+        return _errors.Count == 0 ? SetupExitCodes.Ok : SetupExitCodes.Failed;
     }
 
     /// <summary>
@@ -131,14 +148,12 @@ internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, 
             return;
         if (!StopHost(throughTask: true))
             return; // A new host would only meet the old one's single-instance mutex.
-        try
-        {
-            tasks.Run(setup.TaskPath);
-        }
-        catch (Exception e) when (HostTaskManager.IsTaskSchedulerError(e))
-        {
-            _errors.Add($"The host could not be started (scheduled task {setup.TaskPath}): {e.Message} Use Start host in the app.");
-        }
+        // Through the elevated helper (UAC, no password) when Task Scheduler refuses the user the
+        // task an administrator made (a kept startup task, SPEC 9.4).
+        var run = await hostTask.RunAsync(cancellationToken).ConfigureAwait(false);
+        if (!run.Ok)
+            _errors.Add($"The host was not started: {run.Error} It starts by itself the next time Windows starts (start mode \"at startup\") "
+                + "or you sign in (\"at logon\"); Start host in the app tries again now.");
     }
 
     /// <summary>
@@ -192,6 +207,7 @@ internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, 
         var other = existing is not null && HostTaskDefinition.ReadHostExe(existing.Xml) is { } exe
             && !string.Equals(Path.GetFullPath(exe), Path.GetFullPath(setup.HostExe), StringComparison.OrdinalIgnoreCase);
 
+        _otherCopy = other;
         if (!other)
             await TurnFoldersOffAsync(cancellationToken).ConfigureAwait(false);
         QuitTray();
@@ -220,50 +236,74 @@ internal sealed class AppSetup(ITaskService tasks, IStartModeSwitcher switcher, 
         }
     }
 
-    /// <summary>Turns every saved ON folder OFF through the host, then waits for the sessions to stop. No host: nothing runs.</summary>
+    /// <summary>
+    /// Turns every saved ON folder OFF through the host, then waits for the sessions to stop. No
+    /// host: nothing runs. A host that does not answer within <see cref="TurnOffTimeout"/>, or a
+    /// pipe that refuses the connection, is noted and the uninstall goes on: the host is stopped
+    /// next, and the sessions end with it.
+    /// </summary>
     private async Task TurnFoldersOffAsync(CancellationToken cancellationToken)
     {
-        IHostClient? client = null;
-        for (var attempt = 1; client is null && attempt <= ConnectAttempts; attempt++)
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TurnOffTimeout);
+        var token = deadline.Token;
+        try
         {
-            try
+            IHostClient? client = null;
+            for (var attempt = 1; client is null && attempt <= ConnectAttempts; attempt++)
             {
-                client = await host.ConnectAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    client = await host.ConnectAsync(token).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    if (attempt < ConnectAttempts)
+                        await delay(Poll * 2, token).ConfigureAwait(false);
+                }
             }
-            catch (TimeoutException)
+            if (client is null)
+                return;
+            await using (client.ConfigureAwait(false))
+                await TurnFoldersOffAsync(client, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            _errors.Add($"The host did not answer within {TurnOffTimeout.TotalSeconds:0} s, so the folders were not all turned off "
+                + "(their sessions end with the host; a kept folder list may still have them ON).");
+        }
+        catch (UnauthorizedAccessException e)
+        {
+            _errors.Add("The connection to the host could not be opened, so the folders were not turned off "
+                + "(their sessions end with the host; a kept folder list still has them ON): " + e.Message);
+        }
+    }
+
+    private async Task TurnFoldersOffAsync(IHostClient client, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (await ListAsync(client, cancellationToken).ConfigureAwait(false) is not { } rows)
+                return;
+            foreach (var row in rows.Where(r => r.On && r.Saved))
             {
-                if (attempt < ConnectAttempts)
-                    await delay(Poll * 2, cancellationToken).ConfigureAwait(false);
+                var answer = await client.SendAsync(new SetRequest(row.Path, false), cancellationToken).ConfigureAwait(false);
+                if (!answer.Ok)
+                    _errors.Add($"{row.Path} could not be turned off: {answer.Error}");
+            }
+            var waited = TimeSpan.Zero;
+            while (waited < SessionsStopTimeout
+                && await ListAsync(client, cancellationToken).ConfigureAwait(false) is { } now
+                && now.Any(r => r.Status is FolderStatus.Starting or FolderStatus.Running or FolderStatus.Waiting))
+            {
+                // Each session gets Ctrl+C and up to 5 s; anything left ends with the host.
+                await delay(Poll, cancellationToken).ConfigureAwait(false);
+                waited += Poll;
             }
         }
-        if (client is null)
-            return;
-        await using (client.ConfigureAwait(false))
+        catch (Exception e) when (e is IpcClosedException or IOException)
         {
-            try
-            {
-                if (await ListAsync(client, cancellationToken).ConfigureAwait(false) is not { } rows)
-                    return;
-                foreach (var row in rows.Where(r => r.On && r.Saved))
-                {
-                    var answer = await client.SendAsync(new SetRequest(row.Path, false), cancellationToken).ConfigureAwait(false);
-                    if (!answer.Ok)
-                        _errors.Add($"{row.Path} could not be turned off: {answer.Error}");
-                }
-                var waited = TimeSpan.Zero;
-                while (waited < SessionsStopTimeout
-                    && await ListAsync(client, cancellationToken).ConfigureAwait(false) is { } now
-                    && now.Any(r => r.Status is FolderStatus.Starting or FolderStatus.Running or FolderStatus.Waiting))
-                {
-                    // Each session gets Ctrl+C and up to 5 s; anything left ends with the host.
-                    await delay(Poll, cancellationToken).ConfigureAwait(false);
-                    waited += Poll;
-                }
-            }
-            catch (Exception e) when (e is IpcClosedException or IOException)
-            {
-                _errors.Add("The connection to the host ended while the folders were turned off: " + e.Message);
-            }
+            _errors.Add("The connection to the host ended while the folders were turned off: " + e.Message);
         }
     }
 

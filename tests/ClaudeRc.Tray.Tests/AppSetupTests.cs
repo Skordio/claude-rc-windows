@@ -2,6 +2,7 @@ using System.Diagnostics;
 using ClaudeRc.Core;
 using ClaudeRc.Core.Ipc;
 using ClaudeRc.Tray.Hosting;
+using ClaudeRc.Tray.Services;
 
 namespace ClaudeRc.Tray.Tests;
 
@@ -59,10 +60,88 @@ public class TrayOptionsSetupTests
     [InlineData("--stop-for-update", "--restart-host")]
     [InlineData("--uninstall", "--unregister-notifications")]
     [InlineData("--install", "-ToastActivated")]
+    [InlineData("--install", "--run-host")]
     public void A_setup_action_takes_nothing_but_the_instance(params string[] args)
     {
         // The setup actions act only on the fixed task and the exes in ClaudeRc.exe's own folder.
         Assert.Throws<ArgumentException>(() => Parse(args));
+    }
+
+    [Theory]
+    [InlineData("--install")]
+    [InlineData("--stop-for-update")]
+    [InlineData("--uninstall")]
+    public void Quiet_goes_with_a_setup_action(string arg)
+    {
+        Assert.True(Parse(arg, "--quiet").Quiet);
+        Assert.True(Parse("--quiet", arg, "--instance", "t1").Quiet);
+        Assert.False(Parse(arg).Quiet);
+    }
+
+    [Theory]
+    [InlineData("--quiet")]
+    [InlineData("--quiet", "--instance", "t1")]
+    [InlineData("--quiet", "--set-start-mode", "logon", "--for-user", @"PC\me")]
+    [InlineData("--quiet", "--run-host")]
+    [InlineData("--quiet", "--unregister-notifications")]
+    public void Quiet_is_refused_without_a_setup_action(params string[] args)
+    {
+        // Only the installer's own steps write their errors to a file instead of showing them.
+        Assert.Throws<ArgumentException>(() => Parse(args));
+    }
+
+    [Fact]
+    public void The_setup_log_is_in_the_instances_log_folder()
+    {
+        Assert.Equal(Local + @"\claude-rc-windows\logs\setup.log", Parse("--install", "--quiet").SetupLogPath);
+        Assert.Equal(Local + @"\claude-rc-windows-t1\logs\setup.log", Parse("--install", "--instance", "t1").SetupLogPath);
+    }
+
+    [Fact]
+    public void Run_host_is_parsed_with_the_fixed_task_and_host()
+    {
+        var o = Parse("--run-host");
+        Assert.True(o.RunHost);
+        Assert.Equal(@"\claude-rc-windows\Host", o.TaskPath);
+        Assert.Equal(AppDir + @"\ClaudeRcHost.exe", o.HostExe);
+        Assert.Null(o.Setup);
+        Assert.Null(o.SetStartMode);
+        Assert.Equal(@"\claude-rc-windows-t1\Host", Parse("--run-host", "--instance", "t1").TaskPath);
+        Assert.False(Parse().RunHost);
+    }
+
+    [Theory]
+    [InlineData("--run-host", "--host-exe", @"D:\other\ClaudeRcHost.exe")]
+    [InlineData("--run-host", "--host-exe", AppDir + @"\ClaudeRcHost.exe")]
+    [InlineData("--run-host", "--host-arg", "--evil")]
+    [InlineData("--run-host", "--set-start-mode", "logon", "--for-user", @"PC\me")]
+    [InlineData("--run-host", "--restart-host")]
+    [InlineData("--run-host", "--unregister-notifications")]
+    [InlineData("--run-host", "-ToastActivated")]
+    [InlineData("--run-host", "--uninstall")]
+    public void Run_host_takes_nothing_but_the_instance(params string[] args)
+    {
+        // It runs elevated with an untrusted command line: only the fixed task.
+        Assert.Throws<ArgumentException>(() => Parse(args));
+    }
+
+    [Fact]
+    public void Run_host_arguments_name_only_the_instance()
+    {
+        Assert.Equal(["--run-host"], Parse().RunHostArguments());
+        Assert.Equal(["--run-host", "--instance", "t1"], Parse("--instance", "t1").RunHostArguments());
+        // A debug build's host elsewhere: the helper would refuse its task, so it is not started.
+        Assert.Null(Parse("--host-exe", @"D:\build\ClaudeRcHost.exe").RunHostArguments());
+    }
+
+    [Fact]
+    public void Setup_exit_codes_are_stable()
+    {
+        // The installer script reads them (installer/claude-rc-windows.iss).
+        Assert.Equal(0, SetupExitCodes.Ok);
+        Assert.Equal(1, SetupExitCodes.Failed);
+        Assert.Equal(2, SetupExitCodes.InvalidArguments);
+        Assert.Equal(3, SetupExitCodes.OtherCopy);
     }
 
     [Fact]
@@ -87,6 +166,7 @@ public sealed class AppSetupTests
     private readonly FakeSwitcher _switcher = new();
     private readonly FakeConnector _connector = new();
     private readonly FakeDialogs _dialogs = new();
+    private readonly FakeElevation _elevation = new();
     private readonly FakeRunningTray _tray;
     private readonly FakeProcessStopper _processes;
     private int _unregistered;
@@ -121,7 +201,8 @@ public sealed class AppSetupTests
             State = state,
         };
 
-    private AppSetup Setup(IStartModeSwitcher? switcher = null) => new(_tasks, switcher ?? _switcher, _connector, _tray, _processes,
+    private AppSetup Setup(IStartModeSwitcher? switcher = null, TimeSpan? turnOffTimeout = null) => new(_tasks, switcher ?? _switcher,
+        new HostTaskManager(_tasks, TaskPath, new ElevatedHostRun(_elevation, TaskPath, ["--run-host"])), _connector, _tray, _processes,
         () =>
         {
             _unregistered++;
@@ -132,7 +213,10 @@ public sealed class AppSetupTests
         {
             _delays++;
             return Task.CompletedTask;
-        });
+        })
+    {
+        TurnOffTimeout = turnOffTimeout ?? AppSetup.DefaultTurnOffTimeout,
+    };
 
     private int Index(string entry)
     {
@@ -259,6 +343,42 @@ public sealed class AppSetupTests
         Assert.Contains(_processes.Stops, s => s.Exe == HostExe);
         Assert.Contains($"run {TaskPath}", _tasks.Calls);
         Assert.Empty(_dialogs.Errors);
+    }
+
+    [Fact]
+    public async Task An_upgrade_in_startup_mode_runs_the_kept_task_elevated_when_task_scheduler_refuses()
+    {
+        // The administrator-made startup task: Task Scheduler refuses both the stop and the run.
+        AddTask(StartMode.Startup, HostExe, TaskRunState.Running);
+        _tasks.FailNext("stop", new UnauthorizedAccessException("Access is denied."));
+        _tasks.FailNext("run", new UnauthorizedAccessException("Access is denied."));
+        _elevation.OnRun = _ =>
+        {
+            _journal.Add("elevated run");
+            _tasks.Tasks[TaskPath].State = TaskRunState.Running;
+        };
+
+        Assert.Equal(SetupExitCodes.Ok, await Setup().RunAsync(SetupAction.Install));
+
+        Assert.Empty(_dialogs.Errors);
+        Assert.Empty(_switcher.Calls); // no password prompt: the task is kept
+        Assert.Equal(["--run-host"], Assert.Single(_elevation.Runs));
+        Assert.True(Index($"end {HostExe}") < Index("elevated run"));
+        Assert.Equal(TaskRunState.Running, _tasks.Tasks[TaskPath].State);
+    }
+
+    [Fact]
+    public async Task A_refused_run_cancelled_at_uac_says_when_the_host_starts()
+    {
+        AddTask(StartMode.Startup);
+        _tasks.FailNext("run", new UnauthorizedAccessException("Access is denied."));
+        _elevation.ExitCode = null;
+
+        Assert.Equal(SetupExitCodes.Failed, await Setup().RunAsync(SetupAction.Install));
+
+        var error = Assert.Single(_dialogs.Errors);
+        Assert.Contains("Cancelled", error.Message, StringComparison.Ordinal);
+        Assert.Contains("next time Windows starts", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -462,14 +582,64 @@ public sealed class AppSetupTests
         AddTask(StartMode.Logon, OtherHost, TaskRunState.Running);
         HostWith(TestRows.Make(@"C:\src\a", FolderStatus.Running));
 
-        Assert.Equal(SetupExitCodes.Ok, await Setup().RunAsync(SetupAction.Uninstall));
+        // A code of its own, so the uninstaller keeps that copy's data without asking.
+        Assert.Equal(SetupExitCodes.OtherCopy, await Setup().RunAsync(SetupAction.Uninstall));
 
+        Assert.Empty(_dialogs.Errors);
         Assert.Equal(0, _connector.Attempts);
         Assert.DoesNotContain(_tasks.Calls, c => c.StartsWith("stop", StringComparison.Ordinal) || c.StartsWith("delete", StringComparison.Ordinal));
         Assert.Equal(TaskRunState.Running, _tasks.Tasks[TaskPath].State);
         // This copy's own processes still end, and its toast registration goes.
         Assert.Contains(_processes.Stops, s => s.Exe == HostExe);
         Assert.Contains(_processes.Stops, s => s.Exe == TrayExe);
+        Assert.Equal(1, _unregistered);
+    }
+
+    [Fact]
+    public async Task Another_copys_task_is_reported_even_when_something_else_failed()
+    {
+        AddTask(StartMode.Logon, OtherHost, TaskRunState.Running);
+        _tray.QuitResult = false;
+
+        Assert.Equal(SetupExitCodes.OtherCopy, await Setup().RunAsync(SetupAction.Uninstall));
+
+        Assert.Contains(_dialogs.Errors, e => e.Message.Contains("tray", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task A_host_that_never_answers_does_not_hold_up_the_uninstall()
+    {
+        AddTask(StartMode.Logon, HostExe, TaskRunState.Running);
+        var client = new FakeHostClient { AsyncHandler = _ => new TaskCompletionSource<IpcResponse>().Task };
+        _connector.Enqueue(client);
+
+        var run = Setup(turnOffTimeout: TimeSpan.FromMilliseconds(200)).RunAsync(SetupAction.Uninstall);
+        Assert.Same(run, await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(10))));
+
+        Assert.Equal(SetupExitCodes.Failed, await run);
+        var error = Assert.Single(_dialogs.Errors);
+        Assert.Contains("did not answer", error.Message, StringComparison.Ordinal);
+        // The rest still runs.
+        Assert.True(client.Disposed);
+        Assert.Contains("quit tray", _journal);
+        Assert.Contains(_processes.Stops, s => s.Exe == HostExe);
+        Assert.False(_tasks.Tasks.ContainsKey(TaskPath));
+        Assert.Equal(1, _unregistered);
+    }
+
+    [Fact]
+    public async Task A_pipe_that_refuses_the_connection_does_not_skip_the_rest()
+    {
+        // E.g. the pipe-owner check: the pipe is not this user's host.
+        AddTask(StartMode.Logon, HostExe, TaskRunState.Running);
+        _connector.Error = new UnauthorizedAccessException("The pipe is not owned by the host's user.");
+
+        Assert.Equal(SetupExitCodes.Failed, await Setup().RunAsync(SetupAction.Uninstall));
+
+        var error = Assert.Single(_dialogs.Errors);
+        Assert.Contains("The pipe is not owned by the host's user.", error.Message, StringComparison.Ordinal);
+        Assert.Contains(_processes.Stops, s => s.Exe == HostExe);
+        Assert.False(_tasks.Tasks.ContainsKey(TaskPath));
         Assert.Equal(1, _unregistered);
     }
 
@@ -683,6 +853,50 @@ public sealed class WindowsProcessStopperTests : IDisposable
             Directory.Delete(_root, recursive: true);
         }
         catch (IOException)
+        {
+        }
+    }
+}
+
+/// <summary>A silent install's messages (<c>--quiet</c>) go to the setup log instead of a message box.</summary>
+public sealed class SetupLogDialogsTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "claude-rc-windows-test-setuplog-" + Guid.NewGuid().ToString("N"));
+
+    private string LogPath => Path.Combine(_dir, "logs", "setup.log");
+
+    [Fact]
+    public void Errors_are_appended_one_line_each_and_the_folder_is_created()
+    {
+        var log = new SetupLogDialogs(LogPath, TimeProvider.System);
+
+        log.ShowError(AppSetup.Title, "first problem\n\nsecond problem");
+        log.ShowInfo("Start mode", "a note");
+
+        var lines = File.ReadAllLines(LogPath);
+        Assert.Equal(2, lines.Length);
+        Assert.Matches(@"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", lines[0]);
+        Assert.EndsWith("claude-rc-windows setup: first problem second problem", lines[0], StringComparison.Ordinal);
+        Assert.EndsWith("Start mode: a note", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void It_never_asks_or_picks()
+    {
+        var log = new SetupLogDialogs(LogPath, TimeProvider.System);
+
+        Assert.False(log.Confirm("t", "Continue?"));
+        Assert.Null(log.PickFolder());
+        Assert.Null(log.PickClaudeExecutable(null));
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            Directory.Delete(_dir, recursive: true);
+        }
+        catch (DirectoryNotFoundException)
         {
         }
     }

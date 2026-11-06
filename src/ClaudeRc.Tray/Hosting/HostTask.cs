@@ -134,38 +134,58 @@ internal interface IHostTask
 /// <summary><see cref="IHostTask"/> over Task Scheduler (<see cref="ITaskService"/>). Calls run on the thread pool.</summary>
 /// <param name="tasks">Task Scheduler.</param>
 /// <param name="taskPath">The task's full name (<see cref="TrayOptions.TaskPath"/>).</param>
-internal sealed class HostTaskManager(ITaskService tasks, string taskPath) : IHostTask
+/// <param name="elevated">Runs the task through the elevated helper when Task Scheduler refuses the user (null: no fallback).</param>
+internal sealed class HostTaskManager(ITaskService tasks, string taskPath, IElevatedHostRun? elevated = null) : IHostTask
 {
     /// <inheritdoc/>
     public Task<HostTaskInfo> GetInfoAsync(CancellationToken cancellationToken = default) =>
         Task.Run(Read, cancellationToken);
 
     /// <inheritdoc/>
-    public Task<StartHostResult> RunAsync(CancellationToken cancellationToken = default) => Task.Run(() =>
+    /// <remarks>
+    /// Task Scheduler may refuse the user a task an administrator made (the startup task, 9.2); the
+    /// task is then run through the elevated helper (UAC, no password), if there is one.
+    /// </remarks>
+    public async Task<StartHostResult> RunAsync(CancellationToken cancellationToken = default)
+    {
+        var (result, refused) = await Task.Run(RunUnelevated, cancellationToken).ConfigureAwait(false);
+        if (refused is null)
+            return result!;
+        if (elevated is null)
+            return StartHostResult.Failed($"Could not run the scheduled task {taskPath}: {refused.Message}");
+        return await elevated.RunAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Runs the task as the user; the refusal, if Task Scheduler denied it.</summary>
+    private (StartHostResult? Result, UnauthorizedAccessException? Refused) RunUnelevated()
     {
         var info = Read();
         switch (info.State)
         {
             case HostTaskState.Missing:
-                return StartHostResult.Missing(taskPath);
+                return (StartHostResult.Missing(taskPath), null);
             case HostTaskState.Exists when !info.Enabled:
-                return StartHostResult.Failed(
-                    $"The scheduled task {taskPath} is disabled, so it can't start the host. Enable it in Task Scheduler, or choose a start mode in Settings to create it again.");
+                return (StartHostResult.Failed(
+                    $"The scheduled task {taskPath} is disabled, so it can't start the host. Enable it in Task Scheduler, or choose a start mode in Settings to create it again."), null);
         }
         try
         {
             tasks.Run(taskPath);
-            return StartHostResult.Started;
+            return (StartHostResult.Started, null);
         }
         catch (FileNotFoundException)
         {
-            return StartHostResult.Missing(taskPath);
+            return (StartHostResult.Missing(taskPath), null);
+        }
+        catch (UnauthorizedAccessException e)
+        {
+            return (null, e);
         }
         catch (Exception e) when (IsTaskSchedulerError(e))
         {
-            return StartHostResult.Failed($"Could not run the scheduled task {taskPath}: {e.Message}");
+            return (StartHostResult.Failed($"Could not run the scheduled task {taskPath}: {e.Message}"), null);
         }
-    }, cancellationToken);
+    }
 
     /// <summary>The errors Task Scheduler and the library report (COM errors, access denied, a missing folder, …).</summary>
     internal static bool IsTaskSchedulerError(Exception e) =>

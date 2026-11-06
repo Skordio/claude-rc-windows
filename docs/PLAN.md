@@ -119,6 +119,7 @@ Done: see `docs/m5-decisions.md` (the installer's steps are run by ClaudeRc.exe 
 | M2 | Look at the main window and viewer once | Taste and real-use feel |
 | M4 | Switch to `startup` mode: approve UAC, type your Windows password | Needs elevation and your password |
 | M5 | Run the installer, reboot in both modes, take over a hand-started `claude rc`, uninstall | SPEC §17 manual release checks; needs reboots |
+| M5 | Upgrade in `startup` mode: the host comes back (Task Scheduler may refuse the user the run: UAC for `--run-host`, no password); Start host in `startup` mode; Setup started "as administrator" stops; a `/VERYSILENT` install and uninstall show no message box (data kept, errors in `logs\setup.log`); uninstall while the task runs the portable copy asks nothing and keeps its data | Needs UAC, a real `startup` task and real installs |
 
 ## 6. Total
 

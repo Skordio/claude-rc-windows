@@ -65,7 +65,9 @@ portable build, compiles the installer and writes `artifacts/release/SHA256SUMS.
     mode, so a silent upgrade brings the tray back too).
   - `PrepareToInstall`: when `{app}\ClaudeRc.exe` exists (an upgrade), it runs
     `--stop-for-update` before any file is replaced.
-  - `[UninstallRun]`: `ClaudeRc.exe --uninstall` (waits).
+  - Uninstall: `ClaudeRc.exe --uninstall` (waits), run from `CurUninstallStepChanged(usUninstall)`
+    rather than `[UninstallRun]`, so its exit code is known before the keep-data question
+    (section 8).
 - `CloseApplications=no`: the Restart Manager cannot end the windowless host and would offer to
   restart the apps itself; `--stop-for-update` ends both. If a file is still locked, Inno's own
   retry dialog appears.
@@ -73,8 +75,9 @@ portable build, compiles the installer and writes `artifacts/release/SHA256SUMS.
   start again when `--install` runs the task. The tray is quit and started again.
 - **Uninstall data**: asked at `usUninstall` (before anything is removed): "Keep your folder list,
   settings and logs?" Yes keeps `%APPDATA%\claude-rc-windows` and
-  `%LOCALAPPDATA%\claude-rc-windows\logs`; No deletes both folders. The WebView2 folder always
-  goes. A silent uninstall keeps the data (`SuppressibleMsgBox` default Yes). SPEC 14 asked only
+  `%LOCALAPPDATA%\claude-rc-windows\logs`; No deletes both folders. The WebView2 folder goes
+  (kept only when another copy owns the task, section 8). A silent uninstall keeps the data
+  (`UninstallSilent`; `SuppressibleMsgBox` asked anyway without `/SUPPRESSMSGBOXES`, section 8). SPEC 14 asked only
   about the data folder; the logs follow the same answer, as keeping a log folder for an app whose
   list was deleted (or the other way round) makes no sense. `.claude.json` is never touched.
 - The tray is not started at logon (no `Run` key): SPEC never asked for it, the host is what runs
@@ -84,7 +87,7 @@ portable build, compiles the installer and writes `artifacts/release/SHA256SUMS.
 ## 3. The installer's steps in ClaudeRc.exe (`Hosting/AppSetup.cs`)
 
 `TrayOptions` parses `--install`, `--stop-for-update` and `--uninstall`, exactly one, with nothing
-but `--instance` beside it (no `--host-exe`, `--host-arg`, `--for-user`, `--set-start-mode`,
+but `--instance` and `--quiet` beside it (no `--host-exe`, `--host-arg`, `--for-user`, `--set-start-mode`,
 `--restart-host`, `--unregister-notifications`, `-ToastActivated`). The host is always the
 `ClaudeRcHost.exe` next to ClaudeRc.exe (with a test instance's own derived arguments), the task
 the fixed `\claude-rc-windows[-instance]\Host`, the user the current one (the installer runs
@@ -99,7 +102,8 @@ arguments). Every problem is collected and shown in one message at the end; each
   copy's `startup` task through `StartModeSwitcher` (the elevated helper, UAC and the password
   prompt); anything else (none, `logon`, changed by hand) becomes this copy's `logon` task (an
   upgrade so gets the new version's definition; Task Scheduler refusing an administrator-made task
-  hands it to the helper, as in M4); (3) stop the host; (4) run the task. A task that was not set
+  hands it to the helper, as in M4); (3) stop the host; (4) run the task (through
+  `HostTaskManager`, which falls back to the `--run-host` helper, section 8). A task that was not set
   up (cancelled, failed) stops there with the reason and "choose a start mode in Settings"; a host
   that still runs stops it before (4), since a new host would only meet the old one's mutex.
 - **`--stop-for-update`**: quit the tray, stop the host. Nothing is registered, run or deleted.
@@ -198,3 +202,65 @@ exist yet) and passed after the implementation.
   viewer from the installed single-file exe (WebView2 loader beside the exe); a toast and its
   header name; uninstall with and without keeping the data; `startup` mode before an upgrade and an
   uninstall.
+
+## 8. M5 review
+
+- **Upgrade in startup mode** (major). `--install` keeps a `startup` task that runs this host, stops
+  the host and runs the task. Task Scheduler is expected to refuse the user the stop of that
+  administrator-made task (the stop is then done by ending the process), and Run needs the same
+  rights, so the host could stay down until the next boot. Now a run refused with
+  `UnauthorizedAccessException` goes through a second elevated helper, `ClaudeRc.exe --run-host
+  [--instance X]` (`StartModeHelper.RunHost`): UAC, no password. It takes nothing else on its
+  command line, runs only the fixed task, and only when that task's action is the
+  `ClaudeRcHost.exe` next to it (`HostTaskDefinition.ReadHostExe`); it registers, stops and deletes
+  nothing. Running a task never raises it above its own principal, so an elevated run of the
+  user's task gains nothing. The fallback lives in `HostTaskManager.RunAsync` (`IElevatedHostRun`,
+  `ElevatedHostRun`), so the tray's **Start host** has it too (it had the same gap), and
+  `AppSetup` now runs the task through `IHostTask`. Re-registering through
+  `switcher.SwitchAsync(Startup, restartHost: true)` was the other choice; it asks for the password
+  at every such upgrade. If the run still fails or UAC is declined, the message now says when the
+  host starts by itself (next boot, or next sign-in for logon) and that Start host tries again.
+  Whether Task Scheduler really refuses the run could not be checked here (no startup task on this
+  machine); PLAN 5 lists it.
+- **A host that never answers** (minor). The uninstall's talk to the host has one deadline,
+  `TurnOffTimeout` = 15 s for the sessions + 30 s (`HostAnswerTimeout`), passed to `ConnectAsync`
+  and every `SendAsync`. A deadline that passes, and an `UnauthorizedAccessException` from the
+  connect (the pipe-owner check), are noted and the uninstall goes on: the tray quits, the host is
+  stopped, the task deleted, the toast registration removed.
+- **Silent installs** (minor). The keep-data question is skipped when `UninstallSilent()`
+  (`SuppressibleMsgBox` only skips with `/SUPPRESSMSGBOXES`). The setup steps take `--quiet`
+  (only beside a setup step), which the script passes only when `WizardSilent()` /
+  `UninstallSilent()`; `App` then uses `SetupLogDialogs`, which appends each message as one line to
+  `%LOCALAPPDATA%\claude-rc-windows[-instance]\logs\setup.log` and never asks. The exit code still
+  says it failed (Inno logs it). UAC and the elevated helpers' own messages are not quieted: they
+  belong to an action the user has to approve anyway. A command line that does not parse but
+  contains `--quiet` exits with code 2 and no usage box, so a later installer passing a new option
+  to an older installed exe (`--stop-for-update` runs the old one) cannot block either; no
+  released version predates `--quiet`.
+- **Setup started elevated** (minor). `runasoriginaluser` and `ExecAsOriginalUser` do nothing when
+  Setup was started elevated (Inno's docs: Setup "has no opportunity to run any code" before), and
+  `ExecAsOriginalUser` is not available in the uninstaller. So `InitializeSetup` stops when the
+  process has a full UAC token (`IsAdmin()` and `TokenElevationType` = `TokenElevationTypeFull`,
+  read with `GetTokenInformation`), with a message (only logged in silent mode). With UAC off
+  (`TokenElevationTypeDefault`) there is no unelevated token to use and Setup goes on. The
+  uninstaller is not stopped: an elevated uninstall by the same user does the same steps (and can
+  delete a startup task).
+- **Another copy's data** (minor). `--uninstall` exits with `SetupExitCodes.OtherCopy` (3) when the
+  task runs another copy, whether or not something else failed. The script then asks nothing and
+  keeps `%APPDATA%\claude-rc-windows`, the logs and the WebView2 folder, which the portable copy
+  still uses.
+- **The kept list is OFF** (minor). The uninstall saves every folder OFF through the host
+  (`set on:false`) before it stops it, so a kept list comes back with every folder OFF. That stays
+  (a reinstall does not start sessions on its own, and the host is the only writer of
+  `folders.json`); the question, the README and SPEC 14 say so now. Keeping the ON state would need
+  a host request that stops sessions without saving, which is more than the finding is worth.
+- **Tests** (39 more, 496 in the tray tests): `TrayOptionsSetupTests` (`--quiet` only with a step,
+  the setup log path, `--run-host` with only `--instance`, its arguments, the exit codes);
+  `AppSetupTests` (an upgrade in startup mode whose run Task Scheduler refuses goes through
+  `--run-host` without a password; UAC declined says when the host starts; a host that never
+  answers and a refused pipe still let every later step run; another copy gives code 3, also with
+  errors); `HostTaskManagerTests` and `ElevatedHostRunTests` (the fallback only on access denied;
+  exit codes; no helper arguments means no UAC); `StartModeHelperTests` (`RunHost` runs only this
+  host's task, no task, Task Scheduler's error); `SetupLogDialogsTests`. All ran against stubs
+  first (24 failing), then passed. The installer script was compiled with ISCC; it was not run.
+

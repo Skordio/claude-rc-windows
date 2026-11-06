@@ -171,6 +171,37 @@ internal sealed class StartModeSwitcher(ITaskService tasks, IElevation elevation
         $"This needs administrator rights, and the elevated helper only sets up the ClaudeRcHost.exe next to ClaudeRc.exe, with no other arguments; this app runs {hostExe}.";
 }
 
+/// <summary>Runs the host's task through the elevated helper (<c>ClaudeRc.exe --run-host</c>, SPEC 9.4).</summary>
+internal interface IElevatedHostRun
+{
+    /// <summary>Runs it with UAC (no password); the helper shows its own errors.</summary>
+    Task<StartHostResult> RunAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary><see cref="IElevatedHostRun"/> through <see cref="IElevation"/>.</summary>
+/// <param name="elevation">Runs ClaudeRc.exe elevated.</param>
+/// <param name="taskPath">The task (for the messages).</param>
+/// <param name="arguments">The helper's arguments (<see cref="TrayOptions.RunHostArguments"/>); null when it would refuse this task.</param>
+internal sealed class ElevatedHostRun(IElevation elevation, string taskPath, IReadOnlyList<string>? arguments) : IElevatedHostRun
+{
+    /// <inheritdoc/>
+    public async Task<StartHostResult> RunAsync(CancellationToken cancellationToken = default)
+    {
+        if (arguments is null)
+            return StartHostResult.Failed(
+                $"Task Scheduler needs administrator rights to run {taskPath}, and the elevated helper only runs the task of the ClaudeRcHost.exe next to ClaudeRc.exe; this app runs another one.");
+        var code = await elevation.RunElevatedAsync(arguments, cancellationToken).ConfigureAwait(false);
+        return code switch
+        {
+            HelperExitCodes.Ok => StartHostResult.Started,
+            null or HelperExitCodes.Cancelled => StartHostResult.Failed(
+                $"Cancelled: running the scheduled task {taskPath} needs administrator rights, so the host was not started."),
+            _ => StartHostResult.Failed(
+                $"The scheduled task {taskPath} could not be run (the elevated helper ended with code {code}; it showed the reason)."),
+        };
+    }
+}
+
 /// <summary>Restarting the host through its task: stop the running instance, wait for it to end, run the task.</summary>
 internal static class TaskRestart
 {
@@ -295,6 +326,41 @@ internal sealed class StartModeHelper(ITaskService tasks, ICredentialPrompt prom
             return HelperExitCodes.Ok;
         dialogs.ShowError(Title, TaskRestart.NotRestartedNote + "\n\n" + why);
         return HelperExitCodes.NotRestarted;
+    }
+
+    /// <summary>
+    /// <c>--run-host</c>: runs the fixed task, which Task Scheduler refused to run for the user (an
+    /// administrator-made startup task). No password, nothing registered, stopped or deleted; only a
+    /// task that runs <see cref="StartModeSetup.HostExe"/> (the host next to ClaudeRc.exe).
+    /// </summary>
+    /// <returns>A <see cref="HelperExitCodes"/> value; errors are shown here.</returns>
+    public int RunHost(StartModeSetup setup)
+    {
+        ArgumentNullException.ThrowIfNull(setup);
+        const string RunTitle = "Start host";
+        try
+        {
+            if (tasks.Find(setup.TaskPath) is not { } task)
+            {
+                dialogs.ShowError(RunTitle, StartHostResult.Missing(setup.TaskPath).Error!);
+                return HelperExitCodes.Failed;
+            }
+            // The command line is not trusted: only a task that runs the host next to this exe.
+            var exe = HostTaskDefinition.ReadHostExe(task.Xml);
+            if (exe is null || !string.Equals(Path.GetFullPath(exe), Path.GetFullPath(setup.HostExe), StringComparison.OrdinalIgnoreCase))
+            {
+                dialogs.ShowError(RunTitle,
+                    $"The scheduled task {setup.TaskPath} runs {exe ?? "something else"}, not {setup.HostExe}, so it was not run. Choose a start mode in the app's Settings to set it up again.");
+                return HelperExitCodes.Failed;
+            }
+            tasks.Run(setup.TaskPath);
+            return HelperExitCodes.Ok;
+        }
+        catch (Exception e) when (HostTaskManager.IsTaskSchedulerError(e))
+        {
+            dialogs.ShowError(RunTitle, $"Could not run the scheduled task {setup.TaskPath}: {e.Message}");
+            return HelperExitCodes.Failed;
+        }
     }
 
     /// <summary>Registers the task, handing Task Scheduler the password (if any); the caller wipes it right after.</summary>
