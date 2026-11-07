@@ -1,0 +1,3 @@
+10:16:35.759 baseline: 34 visible top-level windows
+10:16:38.868 NEW 5109F4 pid=11076 class=Chrome_WidgetWin_1 title=
+10:17:15.865 done

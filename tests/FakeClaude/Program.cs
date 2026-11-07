@@ -1,0 +1,275 @@
+// FakeClaude: stands in for claude.exe in the host integration tests (SPEC 17).
+//
+// Behaviour comes from fakeclaude.json in the working folder. Every key is optional; with no
+// file at all it just runs until stopped. Relative file names are relative to the working folder.
+//
+//   record          file: written first, {"args":[…],"cwd":"…","pid":N,"env":{name:value|null},"child_pid":N?}
+//   record_env      names of environment variables to put into "env" (PATH is always included)
+//   spawn_child     true: start a child FakeClaude (own hidden console, ignores Ctrl+C, sleeps
+//                   forever) before writing the record, so a test can check Job Object cleanup
+//   spawn_child_args arguments for that child, before "--fake-child" (e.g. ["rc"], so the child
+//                   looks like claude rc itself; default none)
+//   replay          file whose bytes are written to stdout unchanged (e.g. a tests/fixtures/*.raw)
+//   print           text written to stdout after the replay
+//   prompt          text written to stdout after that; input lines are then read (see input_file)
+//   input_file      file: every input line that arrives is appended to it (reading starts
+//                   when prompt or input_file is set; keys are read one by one and echoed)
+//   size_file       file: the console size, appended as "<cols>x<rows>" at start and on every change
+//   ctrl_c_file     file: "ctrl-c" is appended each time Ctrl+C arrives
+//   ignore_ctrl_c   true: Ctrl+C is ignored (to test the 5 s kill); otherwise Ctrl+C exits with 0
+//   exit_after_ms   exit on its own after this long, with exit_code (default 0), after writing exit_text
+//
+// "--fake-child" anywhere on the command line is the child mode used by spawn_child.
+// "--fake-config <file>" anywhere on the command line reads that file instead of fakeclaude.json
+// (so a FakeClaude started outside the host, as "rc --fake-config x.json", can behave differently
+// from the host's sessions in the same folder).
+// "--version" alone prints "0.0.0-fake (Claude Code)" and exits, like claude --version.
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+
+namespace FakeClaude;
+
+internal static partial class Program
+{
+    // What "claude --version" prints, in claude's format.
+    private const string VersionText = "0.0.0-fake (Claude Code)";
+
+    private static readonly ManualResetEventSlim Stop = new();
+    private static readonly object FileLock = new();
+
+    private static int Main(string[] args)
+    {
+        if (args.Contains("--fake-child"))
+            return Child();
+        if (args is ["--version"])
+        {
+            Console.Out.Write(VersionText + "\n");
+            return 0;
+        }
+
+        var configIndex = Array.IndexOf(args, "--fake-config");
+        var configFile = configIndex >= 0 && configIndex + 1 < args.Length ? args[configIndex + 1] : "fakeclaude.json";
+        var config = Config.Load(Path.GetFullPath(configFile));
+        Console.OutputEncoding = new UTF8Encoding(false);
+        Console.InputEncoding = new UTF8Encoding(false);
+        EnableVirtualTerminal();
+
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            if (config.CtrlCFile is { } f)
+                Append(f, "ctrl-c\n");
+            if (!config.IgnoreCtrlC)
+                Stop.Set();
+        };
+
+        int? childPid = config.SpawnChild ? SpawnChild(config.SpawnChildArgs) : null;
+        if (config.Record is { } record)
+            WriteRecord(record, args, config.RecordEnv, childPid);
+
+        var stdout = Console.OpenStandardOutput();
+        if (config.Replay is { } replay)
+            stdout.Write(File.ReadAllBytes(replay));
+        if (config.Print is { } print)
+            stdout.Write(Encoding.UTF8.GetBytes(print));
+        if (config.Prompt is { } prompt)
+            stdout.Write(Encoding.UTF8.GetBytes(prompt));
+        stdout.Flush();
+
+        if (config.Prompt is not null || config.InputFile is not null)
+            StartThread(() => ReadInput(config.InputFile));
+        if (config.SizeFile is { } sizeFile)
+            StartThread(() => WatchSize(sizeFile));
+
+        var exitCode = 0;
+        if (config.ExitAfterMs is { } ms)
+        {
+            if (!Stop.Wait(ms))
+            {
+                if (config.ExitText is { } text)
+                {
+                    stdout.Write(Encoding.UTF8.GetBytes(text));
+                    stdout.Flush();
+                }
+                exitCode = config.ExitCode;
+            }
+        }
+        else
+        {
+            Stop.Wait();
+        }
+        stdout.Flush();
+        Environment.Exit(exitCode);
+        return exitCode;
+    }
+
+    private static int Child()
+    {
+        Console.CancelKeyPress += (_, e) => e.Cancel = true;
+        Thread.Sleep(Timeout.Infinite);
+        return 0;
+    }
+
+    private static int SpawnChild(IReadOnlyList<string> childArgs)
+    {
+        var psi = new ProcessStartInfo(Environment.ProcessPath!)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var arg in childArgs)
+            psi.ArgumentList.Add(arg);
+        psi.ArgumentList.Add("--fake-child");
+        using var child = Process.Start(psi)!;
+        return child.Id;
+    }
+
+    private static void WriteRecord(string path, string[] args, IReadOnlyList<string> envNames, int? childPid)
+    {
+        var env = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in envNames.Append("PATH"))
+            env[name] = Environment.GetEnvironmentVariable(name);
+        var json = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["args"] = args,
+            ["cwd"] = Environment.CurrentDirectory,
+            ["pid"] = Environment.ProcessId,
+            ["env"] = env,
+            ["child_pid"] = childPid,
+        });
+        var temp = path + ".tmp";
+        File.WriteAllText(temp, json);
+        File.Move(temp, path, overwrite: true);
+    }
+
+    // Key by key, echoing what is typed, like claude's own raw-mode input. conhost's cooked line
+    // input (ReadLine) now and then drops a line written right after the previous one was read.
+    // Ctrl+C stays a signal (processed input is left on).
+    private static void ReadInput(string? file)
+    {
+        var stdout = Console.OpenStandardOutput();
+        var line = new StringBuilder();
+        while (!Stop.IsSet)
+        {
+            ConsoleKeyInfo key;
+            try { key = Console.ReadKey(intercept: true); }
+            catch (InvalidOperationException) { Thread.Sleep(50); continue; }
+            if (key.Key == ConsoleKey.Enter || key.KeyChar == '\r')
+            {
+                Echo(stdout, "\r\n");
+                if (file is not null)
+                    Append(file, line + "\n");
+                line.Clear();
+            }
+            else if (key.KeyChar != '\0')
+            {
+                line.Append(key.KeyChar);
+                Echo(stdout, key.KeyChar.ToString());
+            }
+        }
+    }
+
+    private static void Echo(Stream stdout, string text)
+    {
+        lock (FileLock)
+        {
+            stdout.Write(Encoding.UTF8.GetBytes(text));
+            stdout.Flush();
+        }
+    }
+
+    private static void WatchSize(string file)
+    {
+        var last = "";
+        while (!Stop.IsSet)
+        {
+            string size;
+            try { size = $"{Console.WindowWidth}x{Console.WindowHeight}"; }
+            catch (IOException) { size = "?"; }
+            if (size != last)
+            {
+                Append(file, size + "\n");
+                last = size;
+            }
+            Thread.Sleep(50);
+        }
+    }
+
+    private static void Append(string file, string text)
+    {
+        lock (FileLock)
+            File.AppendAllText(file, text);
+    }
+
+    private static void StartThread(Action action) => new Thread(() => action()) { IsBackground = true }.Start();
+
+    private static void EnableVirtualTerminal()
+    {
+        const uint EnableVirtualTerminalProcessing = 0x0004;
+        var handle = GetStdHandle(-11);
+        if (GetConsoleMode(handle, out var mode) != 0)
+            _ = SetConsoleMode(handle, mode | EnableVirtualTerminalProcessing);
+    }
+
+    [LibraryImport("kernel32.dll")]
+    private static partial nint GetStdHandle(int nStdHandle);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial int GetConsoleMode(nint hConsoleHandle, out uint lpMode);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial int SetConsoleMode(nint hConsoleHandle, uint dwMode);
+}
+
+internal sealed record Config
+{
+    public string? Record { get; init; }
+    public IReadOnlyList<string> RecordEnv { get; init; } = [];
+    public bool SpawnChild { get; init; }
+    public IReadOnlyList<string> SpawnChildArgs { get; init; } = [];
+    public string? Replay { get; init; }
+    public string? Print { get; init; }
+    public string? Prompt { get; init; }
+    public string? InputFile { get; init; }
+    public string? SizeFile { get; init; }
+    public string? CtrlCFile { get; init; }
+    public bool IgnoreCtrlC { get; init; }
+    public int? ExitAfterMs { get; init; }
+    public int ExitCode { get; init; }
+    public string? ExitText { get; init; }
+
+    public static Config Load(string path)
+    {
+        if (!File.Exists(path))
+            return new Config();
+        using var doc = JsonDocument.Parse(File.ReadAllText(path));
+        var root = doc.RootElement;
+        string? Str(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        string? FilePath(string name) => Str(name) is { } s ? Path.GetFullPath(s) : null;
+        bool Bool(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+        int? Int(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : null;
+        return new Config
+        {
+            Record = FilePath("record"),
+            RecordEnv = root.TryGetProperty("record_env", out var names)
+                ? [.. names.EnumerateArray().Select(n => n.GetString()!)]
+                : [],
+            SpawnChild = Bool("spawn_child"),
+            SpawnChildArgs = root.TryGetProperty("spawn_child_args", out var childArgs)
+                ? [.. childArgs.EnumerateArray().Select(n => n.GetString()!)]
+                : [],
+            Replay = FilePath("replay"),
+            Print = Str("print"),
+            Prompt = Str("prompt"),
+            InputFile = FilePath("input_file"),
+            SizeFile = FilePath("size_file"),
+            CtrlCFile = FilePath("ctrl_c_file"),
+            IgnoreCtrlC = Bool("ignore_ctrl_c"),
+            ExitAfterMs = Int("exit_after_ms"),
+            ExitCode = Int("exit_code") ?? 0,
+            ExitText = Str("exit_text"),
+        };
+    }
+}

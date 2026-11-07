@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- ClaudeRc.exe: tray icon and main window; a client of the host's pipe (SPEC 2, 3, 13). -->
+  <PropertyGroup>
+    <!--
+      Windows 10 1809 (17763) TFM: Microsoft.Toolkit.Uwp.Notifications can only show toasts with the
+      Windows SDK projection, which needs a versioned TFM. 1809 is also the oldest Windows SPEC 13
+      supports (ConPTY). See docs/m2-decisions.md.
+    -->
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>ClaudeRc</AssemblyName>
+    <AssemblyTitle>claude-rc-windows</AssemblyTitle>
+    <RootNamespace>ClaudeRc.Tray</RootNamespace>
+    <ApplicationIcon>Assets\tray.ico</ApplicationIcon>
+    <!-- The app is English only; leaves out the TaskScheduler package's translated resources. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="H.NotifyIcon.Wpf" />
+    <PackageReference Include="Microsoft.Web.WebView2" />
+    <PackageReference Include="Microsoft.Toolkit.Uwp.Notifications" />
+    <!-- Task Scheduler (dahall), for the host's scheduled task (SPEC 9); see docs/m4-decisions.md. -->
+    <PackageReference Include="TaskScheduler" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ClaudeRc.Core\ClaudeRc.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Assets\tray.ico" />
+    <!-- The console viewer's page and the vendored xterm.js, served from the assembly (no disk, no network). -->
+    <EmbeddedResource Include="Viewer\web\**\*" LogicalName="viewer/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ClaudeRc.Tray.Tests" />
+    <!-- WPF projects leave System.IO out of the implicit usings (Path clashes with Shapes.Path). -->
+    <Using Include="System.IO" />
+  </ItemGroup>
+</Project>

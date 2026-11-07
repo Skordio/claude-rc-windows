@@ -1,0 +1,16 @@
+<Window x:Class="ClaudeRc.Tray.Views.ConsoleWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        x:ClassModifier="internal"
+        Title="{Binding Title}" Width="1000" Height="680" MinWidth="320" MinHeight="200"
+        WindowStartupLocation="CenterScreen" Icon="/Assets/tray.ico" Background="#FF1E1E1E">
+  <Grid>
+    <wv2:WebView2 x:Name="View" />
+    <!-- Shown instead of the terminal when WebView2 cannot start (runtime missing, …). -->
+    <Border x:Name="MessagePanel" Visibility="Collapsed" Background="White" Padding="24">
+      <TextBox x:Name="MessageText" IsReadOnly="True" BorderThickness="0" TextWrapping="Wrap" FontSize="14"
+               VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="560" />
+    </Border>
+  </Grid>
+</Window>

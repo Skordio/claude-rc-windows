@@ -1,0 +1,16 @@
+﻿         3 ms  10:28:39.783  exe=C:\Users\Steven\.local\bin\claude.exe
+        16 ms  10:28:39.794  cwd=C:\Users\Steven\AppData\Local\Temp\claude\df26003eaca5f50f\f2d7163b-5b2c-5af6-9458-d70f3598d9aa\scratchpad\m0\runs\NonGitC
+        16 ms  10:28:39.794  cmdline=C:\Users\Steven\.local\bin\claude.exe rc --name "m0 verify"
+        16 ms  10:28:39.794  argv[1]=<rc>
+        16 ms  10:28:39.794  argv[2]=<--name>
+        16 ms  10:28:39.794  argv[3]=<m0 verify>
+        27 ms  10:28:39.805  pseudoconsole 120x40 created
+        41 ms  10:28:39.818  started pid=27212
+       164 ms  10:28:39.942  job pids=27212:claude
+      4257 ms  10:28:44.035  job pids=28560:conhost,13956:conhost,17064:conhost,28416:bash,14476:bash,29112:bash,29304:node,30532:bash,27212:claude,28596:claude,21680:bash,25092:bash
+      6300 ms  10:28:46.078  job pids=28560:conhost,27212:claude,28596:claude
+     15016 ms  10:28:54.794  input (auto-stop Ctrl+C) hex=03
+     15885 ms  10:28:55.663  exited code=0 (0x00000000) killed=False t=15.885s after-ctrl-c=0.871s
+     16393 ms  10:28:56.171  job pids after exit=
+     16399 ms  10:28:56.176  reader EOF
+     16399 ms  10:28:56.177  total bytes=10910

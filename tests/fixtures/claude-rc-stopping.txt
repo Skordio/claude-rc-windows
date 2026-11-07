@@ -1,0 +1,10 @@
+Spawn mode: same-dir (saved for this folder; press w to change)
+
+[10:13:14] Shutting down 1 active session(s)…
+[10:13:14] Environment preserved. Restart `claude remote-control` to reconnect existing sessions.
+·✔· Connected · gitB · master
+    Capacity: 1/32 · New sessions will be created in the current directory
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01XXXXXXXXXXXXXXXXXXXXXX
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode

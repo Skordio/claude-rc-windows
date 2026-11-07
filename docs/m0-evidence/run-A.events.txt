@@ -1,0 +1,17 @@
+﻿         6 ms  10:09:46.424  exe=C:\Users\Steven\.local\bin\claude.exe
+        25 ms  10:09:46.439  cwd=C:\Users\Steven\AppData\Local\Temp\claude\df26003eaca5f50f\f2d7163b-5b2c-5af6-9458-d70f3598d9aa\scratchpad\m0\runs\gitA
+        25 ms  10:09:46.439  cmdline=C:\Users\Steven\.local\bin\claude.exe rc --name "m0 spike & test"
+        25 ms  10:09:46.439  argv[1]=<rc>
+        25 ms  10:09:46.439  argv[2]=<--name>
+        25 ms  10:09:46.439  argv[3]=<m0 spike & test>
+        37 ms  10:09:46.451  pseudoconsole 120x40 created
+        53 ms  10:09:46.467  started pid=29620
+       176 ms  10:09:46.590  job pids=29620:claude
+     17446 ms  10:10:03.860  input (01.in) hex=790D
+     34879 ms  10:10:21.293  input (02.in) hex=310D
+     88350 ms  10:11:14.765  input (03.in) hex=0D
+    106609 ms  10:11:33.023  input (04.in) hex=03
+    107186 ms  10:11:33.600  exited code=0 (0x00000000) killed=False t=107.186s
+    107693 ms  10:11:34.107  job pids after exit=
+    107699 ms  10:11:34.113  reader EOF
+    107700 ms  10:11:34.114  total bytes=4968

@@ -1,0 +1,247 @@
+# M3 decisions
+
+Decisions made while implementing adoption of externally started `claude rc` (SPEC 7) that
+SPEC.md and PLAN.md leave open. SPEC 7 now states the behaviour; this file says how it is built
+and why.
+
+## 1. Layout
+
+| Piece | Where | What |
+|---|---|---|
+| Matcher | `src/ClaudeRc.Core/Adoption/ExternalSessionMatcher.cs` | Pure: which processes are external `claude rc` sessions, over `ProcessFacts` (pid, parent pid, image name, creation time, argv, cwd, owner SID). Unit-tested in Core (`ExternalSessionMatcherTests`). |
+| Reader | `src/ClaudeRc.Host/Adoption/WindowsProcesses.cs` | Thin Windows layer: Toolhelp snapshot; for candidates only, creation time, token user, and the command line and current directory from the PEB. Reads, never changes. |
+| Stopper | `src/ClaudeRc.Host/Adoption/ExternalStopper.cs` | Take over's stop of one external process tree. |
+| Host | `HostApp` (`ScanExternal`, `ScanLoop`, `TakeOver`) | When to scan, what to report to the supervisor, running take overs. |
+| Supervisor | `Supervisor.TakeoverFailed` (new) | A failed take over shows on the row's `error`. The rest (`ExternalChanged`, `Takeover`, `StopExternal`) was already there from M1. |
+
+## 2. The matcher
+
+- Image names count case-insensitively. `claude.exe` always counts, and so does the Settings claude
+  path's file name when it is an `.exe` (`ExternalSessionMatcher.ForHost`). A `.cmd` setting adds
+  nothing: the shim runs `claude.exe` or `node`.
+- The subcommand must be the **first** argument and is compared case-sensitively (`rc`,
+  `remote-control`), as SPEC 7 says ("arguments start with"). `claude --debug rc` is not matched.
+- node: leading node options (arguments starting with `-`) are skipped, then the script must end in
+  `\claude-code\cli.js` (`/` accepted), then `rc`/`remote-control`. `node -e x cli.js rc` does not
+  match (the `-e` value is taken as the script).
+- **Each tree counts once.** A match whose ancestor also matches is dropped, so an `rc` child of
+  an `rc` parent is not a second session. An ancestor is followed only while it was created no
+  later than its child (creation times), so a parent PID that has been reused by a newer process
+  is never followed. The walk stops at a process whose creation time is unknown, and survives
+  cycles.
+- **Hosted processes** are the members of the sessions' Job Objects plus each session's main
+  PID; a match below one of them (by the same ancestor rule) is dropped too. The host's own PID is
+  **not** in that set: in tests the in-process host is the test runner, which is also the parent of
+  the FakeClaude the test starts "outside the host". The host's own image is never a candidate.
+- `StillMatches` is what take over checks just before stopping: same PID and creation time, still
+  `claude rc` of this user, normalised cwd still the row's folder.
+- Folders are compared with `PathNormalizer.Comparer` after `PathNormalizer.Normalize` (which
+  removes the PEB's trailing `\`). `ByFolder` keeps every external session per folder, oldest first;
+  the supervisor is told the oldest PID.
+
+## 3. Reading processes
+
+- `CreateToolhelp32Snapshot` lists every process (pid, parent pid, image file name). Only
+  candidates (by image name) are opened, with `PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`
+  (falling back to `PROCESS_QUERY_LIMITED_INFORMATION`, which gives the creation time and owner but
+  no cwd). Their ancestors are opened with the limited right for their creation time only.
+- Owner: `OpenProcessToken(TOKEN_QUERY)` → `TokenUser` → string SID.
+- PEB: `NtQueryInformationProcess(ProcessBasicInformation)` → `PebBaseAddress`, then
+  `PEB.ProcessParameters` (0x20) and in `RTL_USER_PROCESS_PARAMETERS` the `UNICODE_STRING`s
+  `CurrentDirectory.DosPath` (0x38) and `CommandLine` (0x70). A WOW64 target:
+  `ProcessWow64Information` gives the 32-bit PEB; offsets 0x10, 0x24 and 0x40, 32-bit
+  `UNICODE_STRING`. An x64 process on ARM64 is not WOW64 and uses the 64-bit layout. Strings are
+  capped at 64 KB. `WindowsProcessesTests` read a 64-bit FakeClaude and a 32-bit
+  `SysWOW64\PING.EXE`, both started hidden in a temp folder by the test.
+- argv: `CommandLineToArgvW` (an empty command line gives no arguments rather than this process's
+  own path).
+- Anything that fails (access denied, the process exited, still being created) leaves that fact
+  null; nothing throws. So an **elevated** `claude rc` is not seen by a host that is not elevated
+  (SPEC 7 says so). The System process (pid 4) reads as "no details".
+- All P/Invoke goes through CsWin32 (PLAN 1). `CommandLineToArgvW` is generated as
+  `PInvoke.CommandLineToArgv`; `EnumWindows` takes an `[UnmanagedCallersOnly]` callback with a
+  `GCHandle` for its state.
+
+## 4. When the host scans
+
+`HostApp.ScanExternal` lists processes outside the host lock, then under the lock takes the job
+members, drops matches that are no longer alive with the same creation time
+(`WindowsProcesses.IsAlive`), and reports each folder whose oldest PID changed to
+`Supervisor.ExternalChanged`. Doing the job and liveness checks under the lock closes two races:
+a session started after the snapshot is already in its job when the lock is taken (it is started
+under the lock), and a hosted process that died after the snapshot is not alive any more (a
+session is removed from the host only after its process has exited). Scans never overlap (a
+semaphore).
+
+It runs:
+- **before `Load`** at host start (SPEC 5.4), under the lock that also guards the load, so a
+  folder with an external session is never started, and the very first `list` already shows it;
+- every `HostConfig.ExternalScanInterval` (5 s; scaled by `WithTimeScale` like the other timings,
+  so 100 ms in the integration tests; one test runs at the real 5 s);
+- **before `add`, `set` ON and `restart`**, so a folder added a moment after the user started their
+  own `claude rc` there gets no second session. This is not in the spec text before M3; SPEC 7 now
+  says it. A crash-restart after the backoff can still race an external session started in the
+  same seconds; the scan then shows both, and the host never stops either;
+- **right after a take over**, so the hosted start follows at once instead of up to 5 s later.
+
+A scan that fails (Toolhelp error) is logged to host.log and the next one tries again.
+
+Lock order (review fix): the scan gate is always taken before the host lock. Host start takes the
+gate, then the lock, and scans inside both (`ScanCore`); before the fix it took the lock first, so
+a client's `add` that won the gate right after the pipe opened could deadlock the host.
+
+## 5. Take over
+
+- The pipe op `takeover` now goes to `Supervisor.Takeover` (until M3 it answered an error). The
+  supervisor saves the folder ON, logs "taking over the external claude rc (pid N)" and emits
+  `StopExternal`. The host runs the stop on a background task with every external session the last
+  scan found **in that folder** (a folder can have more than one; the row shows the oldest).
+- `ExternalStopper.Stop`, per process:
+  1. open it (query, synchronize, terminate; if terminate is denied, query only, to read its
+     creation time). If it is gone, or its creation time differs (the PID now names another
+     process, which may be one the host may not touch), it counts as stopped and nothing is
+     touched. If it is the scanned process but terminate is denied, the take over fails
+     ("… is it running as administrator?"). With the handle
+     held (so the PID cannot be reused meanwhile) it reads the process again and checks
+     `StillMatches`; if it no longer is `claude rc` in that folder, nothing is stopped and the take
+     over fails with that message;
+  2. finds its tree (`ProcessTree`, review fix): a listed process is opened, and counts as a
+     child of a member only if the parent PID it records itself (`InheritedFromUniqueProcessId`,
+     read through that handle, so a PID reused between the Toolhelp snapshot and the open is
+     caught) is the member's, it was created after the member and, if the member has exited,
+     before that exit. Every member's handle is held until the stop returns, so the PID of a
+     member that exits (normally during the `WM_CLOSE` grace) cannot go to another process whose
+     children would then look like the tree's. The host's own PID and its sessions' job members
+     are excluded: never added, walked below or terminated; if one is found below the target
+     (the host was started by hand from a shell inside that `claude rc`), nothing is stopped and
+     the take over fails with "the app's host or one of its sessions runs inside this claude rc";
+  3. **windows**: visible, unowned top-level windows of the `claude rc` process itself or of a
+     `conhost.exe` that is its direct child (its own console window). Those get `WM_CLOSE`, and the
+     stop waits up to `TakeoverCloseGrace` (3 s) for it to exit. A window of any other process is
+     never closed: on Windows 11 a console program normally runs in a Windows Terminal tab, whose
+     window belongs to `WindowsTerminal.exe` and holds the user's other tabs; a `claude rc` started
+     from a shell shares the shell's console, whose host is the shell's child, not claude's. Closing
+     those would close the user's terminal. In those cases step 4 does the stop;
+  4. terminates the process (exit code 1), then, in two passes (to catch children started
+     meanwhile; the tree is expanded again before each), every tree member still running, each
+     through the handle held since it was found.
+     It waits up to 5 s for the process to be gone.
+- The outcome goes to the folder log ("took over: stopped the external claude rc (pid N), …
+  process(es) of its tree terminated", or "take over: could not stop …") and host.log. A failure
+  calls `Supervisor.TakeoverFailed`: the row stays `external`, ON, and its `error` reads
+  "take over failed: …" until the next start or take over. Then the host scans at once.
+
+## 6. Safety: the user's own claude rc sessions
+
+The user had real `claude rc` sessions running while M3 was built and tested. Nothing here may
+stop, signal or take over a process a test did not start.
+
+- **What a host can stop.** The only effect that stops an external process is `StopExternal`, and
+  only `Supervisor.Takeover` emits it, for the folder named in the request; the host stops only the
+  processes the last scan found in that folder, each checked again (`StillMatches`) just before.
+  OFF, Remove, Restart, host quit and host restart never stop an external process. Pinned by
+  `SupervisorTests.Only_take_over_ever_asks_to_stop_an_external_session`,
+  `…Take_over_names_only_its_own_folders_external_process`,
+  `AdoptionTests.Turning_off_removing_restarting_the_host_and_another_folders_take_over_never_stop_an_external_session`
+  and `ExternalStopperTests` (another process under the same PID, a process that moved to another
+  folder and one without `rc` are left running).
+- **What a test host sees.** SPEC 7 lists an external `claude rc` in a folder that is not in the
+  list as an unsaved row. A test host using the production matcher would therefore list the user's
+  real sessions. That would be harmless (it never acts on them), but it makes tests depend on what
+  the user is running. So `HostConfig.ExternalImageNames` is a test seam: when set, only those image
+  names count as claude and the node rule is off. `TestHost` sets it to `FakeClaude.exe`, so an
+  in-process test host never even opens the user's `claude.exe` processes. Pinned by
+  `AdoptionTests.A_test_host_lists_only_its_own_temp_folders`.
+- **Test isolation: other tests' FakeClaudes.** Image names alone still let a test host see every
+  `FakeClaude.exe rc` on the machine: the external fakes and the hosted sessions (and their `rc`
+  children) of other tests, whether in parallel in the same run, in a second `dotnet test` at the
+  same time, or a manual test host. They showed up as unsaved external rows and broke tests that
+  expect only their own rows (`A_test_host_lists_only_its_own_temp_folders`,
+  `The_hosts_own_sessions_are_never_external_even_with_an_rc_child`, `Add_refuses_…`,
+  `Remove_only_when_off_…`, `DebugCliTests`, …). So there is a second test seam,
+  `HostConfig.ExternalFolderRoot`, used only together with `ExternalImageNames`: a process whose
+  folder is not that root or under it is left out, through the matcher's `normalize` (outside the
+  root reads as "no folder"). `TestHost` sets it to its own temp root. Production matching (SPEC 7)
+  does not change: `ForHost` is untouched and the seam is null by default. Pinned by
+  `AdoptionTests.A_test_host_never_lists_another_test_hosts_fake_claude_rc` (an external and a
+  hosted `rc`-child session of a second test host are never in the first one's rows or events;
+  seen failing without the seam).
+- **"No FakeClaude left" is per test.** The check on dispose (`TestHost`, `FakeClaudeHarness`,
+  `ExternalFake`'s orphan child) counted every FakeClaude from the test output, so it failed while
+  another test or run had its own running. `FakeClaudeHarness.RunningFakeClaudes(root)` now counts
+  only FakeClaudes whose current directory (read from the process, as the scan does) is under the
+  test's own root. Every FakeClaude a test starts runs in its root (children inherit the folder).
+- With both, the host tests run with xUnit's parallel collections on (the assembly-wide
+  `DisableTestParallelization` is gone: about 30 s instead of 70 s) and two runs at once pass.
+  Running them that way also showed load races in the tests, fixed there: reads of a file
+  FakeClaude is writing are retried (`TestHost.Record`, `FakeClaudeHarness.ReadText`); host quit
+  waits for each session's record, which FakeClaude writes after its Ctrl+C handler is set up (the
+  scaled 600 ms starting timeout can show Running before a slow FakeClaude has started, and Off
+  shows while a session is still stopping); the 5 s stop-grace test's upper bound is 15 s (the
+  lower bound pins the grace).
+- **The real ClaudeRcHost.exe in tests** (`HostProcessTests`) uses the production matcher, because
+  the seam is not a command-line option (no test-only switch in the shipped exe). It may list the
+  user's real `claude rc` sessions as unsaved rows. That is accepted: it only reads them
+  (`PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`, the same access Task Manager uses for the
+  command-line column), never asks to stop one, and runs with temp data folders and an
+  `--instance`. `HostProcessTests` now looks only at its own folder's row and checks that every
+  other row is an unsaved, OFF `external` row.
+- Tests start their "external" FakeClaude hidden (`CreateNoWindow`, `ExternalFake`) in temp
+  folders, and kill only those processes (and a child FakeClaude of theirs, after checking it is
+  a FakeClaude from the test output). The 32-bit reader test starts `SysWOW64\PING.EXE -n 30
+  127.0.0.1` hidden and kills it.
+
+## 7. FakeClaude
+
+New options, all for adoption tests:
+- `--fake-config <file>` anywhere on the command line reads that file instead of
+  `fakeclaude.json`, so the external one (`rc --fake-config external.json`) can behave differently
+  from the host's sessions in the same folder (for example exit after 1.5 s, while the host's runs
+  until stopped).
+- `--fake-child` anywhere on the command line is the child mode, and `spawn_child_args` puts
+  arguments before it, so a child can look like `claude rc` itself (`rc --fake-child`).
+
+## 8. Tray
+
+The view-model rules for external rows were already right in M2 (blue "running (started outside
+the app)", Show disabled, Take over shown and enabled, Restart and Remove off, no OFF
+confirmation). M3 adds:
+- `IsUnsaved`, `UnsavedText` ("not in your list") and `ToggleToolTip`. An unsaved row has its name
+  in italics, muted, and a blue-bordered "not in your list" tag; its switch's tooltip says that ON
+  adds the folder and leaves that claude rc running. SPEC 3.1 now says so.
+- Tests for these, for the external row's command states, and for the main view-model: turning an
+  unsaved row ON sends `set` without a question, turning an ON external row OFF asks nothing, and
+  a take over that the host accepts shows no error.
+
+## 9. Tests
+
+- Core: `ExternalSessionMatcherTests` (38 cases) and seven new `SupervisorTests`. Written first
+  and seen failing (40 failures against `NotImplementedException` stubs; the supervisor pins that
+  describe M1 behaviour passed at once, as expected).
+- Host: `AdoptionTests` (13), `WindowsProcessesTests` (6), `ExternalStopperTests` (5). The adoption
+  and reader tests ran first against stubs and an unchanged host and failed. The first real run
+  found one bug (the host's own PID in the excluded set hid every process started by the test
+  runner), fixed in section 2. `ExternalStopperTests` were added after the stopper, as extra
+  safety pins.
+- Review fixes: `ProcessTreeTests` (8, over a fake process table: a dead member whose PID went to
+  another process whose child must not be followed, a PID reused between the snapshot and the
+  open, excluded PIDs, handles held and released) and three more `ExternalStopperTests` (the host
+  or a session inside the tree: nothing stopped; a PID that now names a process the host may not
+  terminate: counts as stopped; the scanned process itself not terminable: error; the last two
+  use a test FakeClaude whose DACL grants only query). Seen failing first (stubs, or the old open
+  logic). Those two run the stopper on a thread impersonating the test's token with SeDebugPrivilege
+  removed, and first check that the FakeClaude cannot be opened to terminate it: the GitHub runner
+  is elevated with SeDebugPrivilege enabled, which ignores the DACL. The host never enables that
+  privilege; an elevated host that has it may simply stop such a process, which SPEC 7 allows. Take-over tests now wait on a handle to the child opened while it ran, not on its bare
+  PID, which the hosted session started next could reuse.
+- Tray: 10 new test cases (251 → 261); the new properties' tests failed to compile before the properties existed.
+- Every Host test still checks that no FakeClaude is left running in its own temp root (section 6).
+
+## 10. Not done, or left for later
+
+- An elevated `claude rc` is not seen by a non-elevated host (it cannot read its PEB). SPEC 7 says
+  so; the user would take it over by hand.
+- Closing a real `claude rc`'s own console window (step 3) is not tested automatically: it needs a
+  visible window. The Drive step should start `claude rc` with its own console
+  (`start "" claude rc` from cmd, with conhost as the default terminal) in a throwaway folder,
+  and take it over.

@@ -1,0 +1,30 @@
+{
+  "C:/Users/Steven/AppData/Local/Temp/claude/df26003eaca5f50f/f2d7163b-5b2c-5af6-9458-d70f3598d9aa/scratchpad/m0/runs/gitA": {
+    "allowedTools": [],
+    "mcpContextUris": [],
+    "mcpServers": {},
+    "enabledMcpjsonServers": [],
+    "disabledMcpjsonServers": [],
+    "hasTrustDialogAccepted": true,
+    "hasClaudeMdExternalIncludesApproved": false,
+    "hasClaudeMdExternalIncludesWarningShown": false,
+    "remoteControlSpawnMode": "same-dir"
+  },
+  "C:/Users/Steven/AppData/Local/Temp/claude/df26003eaca5f50f/f2d7163b-5b2c-5af6-9458-d70f3598d9aa/scratchpad/m0/runs/gitB": {
+    "hasTrustDialogAccepted": true,
+    "remoteControlSpawnMode": "same-dir"
+  },
+  "C:/Users/Steven/AppData/Local/Temp/claude/df26003eaca5f50f/f2d7163b-5b2c-5af6-9458-d70f3598d9aa/scratchpad/m0/runs/NonGitC": {
+    "hasTrustDialogAccepted": true
+  },
+  "c:/users/steven/appdata/local/temp/claude/df26003eaca5f50f/f2d7163b-5b2c-5af6-9458-d70f3598d9aa/scratchpad/m0/RUNS/nongitc": {
+    "allowedTools": [],
+    "mcpContextUris": [],
+    "mcpServers": {},
+    "enabledMcpjsonServers": [],
+    "disabledMcpjsonServers": [],
+    "hasTrustDialogAccepted": true,
+    "hasClaudeMdExternalIncludesApproved": false,
+    "hasClaudeMdExternalIncludesWarningShown": false
+  }
+}

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Same TFM as the tray app, which it references. -->
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- The tray's view-models are tested without any window; WPF is referenced only so the tray assembly loads. -->
+    <UseWPF>true</UseWPF>
+    <!-- Test methods do not need XML doc comments. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+    <PackageReference Include="TaskScheduler" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ClaudeRc.Core\ClaudeRc.Core.csproj" />
+    <ProjectReference Include="..\..\src\ClaudeRc.Tray\ClaudeRc.Tray.csproj" />
+    <!-- Built first and copied next to the tests: the task integration test runs a test host through Task Scheduler. -->
+    <ProjectReference Include="..\..\src\ClaudeRc.Host\ClaudeRc.Host.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="System.IO" />
+  </ItemGroup>
+</Project>

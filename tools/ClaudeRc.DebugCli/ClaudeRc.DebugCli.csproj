@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Pipe client for driving the host by hand in M1 (PLAN 1). Internal tool, never shipped. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>ClaudeRc.DebugCli</AssemblyName>
+    <RootNamespace>ClaudeRc.DebugCli</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ClaudeRc.Core\ClaudeRc.Core.csproj" />
+  </ItemGroup>
+</Project>

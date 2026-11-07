@@ -1,0 +1,18 @@
+
+Remote Control starts Claude Code sessions in this folder, driven from your other devices:
+  c:\users\steven\appdata\local\temp\claude\df26003eaca5f50f\f2d7163b-5b2c-5af6-9458-d70f3598d9aa\scratchpad\m0\RUNS\non
+gitc
+
+Quick safety check: is this a project you created or one you trust? Sessions started here can read, edit, and execute fi
+les, and this folder's project settings (hooks, MCP servers, permission rules, helper commands) apply to them.
+Security guide: https://code.claude.com/docs/en/security
+Trust c:\users\steven\appdata\local\temp\claude\df26003eaca5f50f\f2d7163b-5b2c-5af6-9458-d70f3598d9aa\scratchpad\m0\RUNS
+\nongitc? [y/N] y
+
+·✔· Connected · nongitc
+    Capacity: 1/32 · New sessions will be created in the current directory
+    m0 spike & test
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01XXXXXXXXXXXXXXXXXXXXXX
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code

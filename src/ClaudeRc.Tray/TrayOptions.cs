@@ -1,0 +1,344 @@
+using ClaudeRc.Core.Hosting;
+using ClaudeRc.Tray.Hosting;
+
+namespace ClaudeRc.Tray;
+
+/// <summary>
+/// The tray app's command line (PLAN 2.2):
+/// <c>[--instance &lt;suffix&gt;] [-ToastActivated] [--unregister-notifications] [--host-exe &lt;path&gt;] [--host-arg &lt;arg&gt;]…</c>,
+/// and for the elevated start-mode helper (SPEC 9.2)
+/// <c>--set-start-mode logon|startup --for-user &lt;DOMAIN\name&gt; [--restart-host]</c>, and for the installer
+/// (SPEC 14) <c>--install</c>, <c>--stop-for-update</c> or <c>--uninstall</c> (each optionally
+/// <c>--quiet</c>; <c>--install</c> also <c>--fresh-install</c>), for the sign-in start (SPEC 3.4)
+/// <c>--background</c>, and for the elevated run-host helper (SPEC 9.4) <c>--run-host</c>. The instance suffix is
+/// added to the pipe name (so it meets the host started with the same <c>--instance</c>), to the
+/// single-instance names, and to the scheduled task folder, so a test tray never runs the real task.
+/// </summary>
+/// <remarks>
+/// The helper runs elevated once UAC is approved, so its command line is not trusted (any process
+/// of the user can start it with <c>runas</c>, and the UAC prompt shows ClaudeRc.exe): it only ever
+/// sets up the fixed task running the <c>ClaudeRcHost.exe</c> next to it, with no arguments, or for
+/// a test instance only that instance's own <c>--instance</c> and folder options
+/// (<see cref="HelperHostArgumentsError"/>). Anything else is refused. The installer's steps take
+/// no path or account either: they act on the fixed task, the exes in ClaudeRc.exe's own folder
+/// and the current user, and accept only <c>--instance</c> besides.
+/// </remarks>
+internal sealed record TrayOptions
+{
+    private const string Product = "claude-rc-windows";
+
+    /// <summary>The host's file name, next to ClaudeRc.exe in the installed or portable folder.</summary>
+    public const string HostExeName = "ClaudeRcHost.exe";
+
+    /// <summary>What Windows adds when it starts the app for a toast click (Microsoft.Toolkit.Uwp.Notifications).</summary>
+    public const string ToastActivatedArgument = "-ToastActivated";
+
+    /// <summary>The <c>--instance</c> suffix, if any.</summary>
+    public string? Instance { get; init; }
+
+    /// <summary>The host's pipe name (same rule as <see cref="HostOptions.PipeName"/>).</summary>
+    public required string PipeName { get; init; }
+
+    /// <summary>One tray per instance in this logon session.</summary>
+    public required string MutexName { get; init; }
+
+    /// <summary>A second launch sets this event; the first one then shows its window.</summary>
+    public required string ShowEventName { get; init; }
+
+    /// <summary>Set by the installer's steps (<see cref="Setup"/>); the running tray then quits.</summary>
+    public string QuitEventName { get; init; } = "";
+
+    /// <summary><c>--install</c>, <c>--stop-for-update</c> or <c>--uninstall</c>: run that installer step (SPEC 14), then exit.</summary>
+    public SetupAction? Setup { get; init; }
+
+    /// <summary><c>--quiet</c> (only with a setup step): its errors go to <see cref="SetupLogPath"/> instead of a message box.</summary>
+    public bool Quiet { get; init; }
+
+    /// <summary>Where a quiet setup step writes its errors: <c>%LOCALAPPDATA%\claude-rc-windows[-instance]\logs\setup.log</c>.</summary>
+    public string SetupLogPath { get; init; } = "";
+
+    /// <summary><c>--fresh-install</c> (only with <c>--install</c>): no earlier install was there, so the app is set to start at sign-in.</summary>
+    public bool FreshInstall { get; init; }
+
+    /// <summary><c>--background</c> (the sign-in start, SPEC 3.4): the tray starts in the notification area without its window.</summary>
+    public bool Background { get; init; }
+
+    /// <summary><c>--run-host</c>: the elevated helper that only runs the fixed task (SPEC 9.4), then exits.</summary>
+    public bool RunHost { get; init; }
+
+    /// <summary>The host's scheduled task (SPEC 9): <c>\claude-rc-windows[-instance]\Host</c>.</summary>
+    public required string TaskPath { get; init; }
+
+    /// <summary>The WebView2 user data folder of the console viewer: <c>%LOCALAPPDATA%\claude-rc-windows\webview2[-instance]</c>.</summary>
+    public string WebViewDataDir { get; init; } = "";
+
+    /// <summary>Started by Windows because a toast was clicked while the app was not running (<c>-ToastActivated</c>).</summary>
+    public bool ToastActivated { get; init; }
+
+    /// <summary><c>--unregister-notifications</c>: remove the toast registration (for the uninstaller) and exit.</summary>
+    public bool UnregisterNotifications { get; init; }
+
+    /// <summary>
+    /// ClaudeRcHost.exe, which the scheduled task runs: next to ClaudeRc.exe, or <c>--host-exe</c>
+    /// (not in helper mode, which always uses <see cref="AppHostExe"/>).
+    /// </summary>
+    public string HostExe { get; init; } = "";
+
+    /// <summary>The ClaudeRcHost.exe next to ClaudeRc.exe: the only host the elevated helper sets up.</summary>
+    public string AppHostExe { get; init; } = "";
+
+    /// <summary>
+    /// The host's arguments in the task: none in production. A test instance's host gets
+    /// <c>--instance</c> and folders of its own (data, logs, <c>.claude.json</c>), so it never
+    /// shares the real host's state; <c>--host-arg</c>s replace them.
+    /// </summary>
+    public IReadOnlyList<string> HostArguments { get; init; } = [];
+
+    /// <summary><c>--set-start-mode</c>: run as the elevated helper that sets the start mode, then exit.</summary>
+    public StartMode? SetStartMode { get; init; }
+
+    /// <summary><c>--for-user</c>: the account (<c>DOMAIN\name</c>) the helper sets the task up for.</summary>
+    public string? ForUser { get; init; }
+
+    /// <summary><c>--restart-host</c>: after setting the mode, the helper stops the task's host and runs the task again.</summary>
+    public bool RestartHost { get; init; }
+
+    /// <summary>
+    /// The elevated helper's arguments, so it sets up the same task, host and host arguments as this
+    /// app. They are all explicit: an elevated process can run as another (administrator) account,
+    /// whose own folders must not leak into the task.
+    /// </summary>
+    /// <returns>
+    /// Null when the helper would refuse this app's task: a host that is not next to ClaudeRc.exe
+    /// (a debug build's <c>--host-exe</c>), or host arguments other than a test instance's own.
+    /// </returns>
+    public IReadOnlyList<string>? HelperArguments(StartMode mode, string account, bool restartHost)
+    {
+        if (!SamePath(HostExe, AppHostExe) || HelperHostArgumentsError(Instance, HostArguments) is not null)
+            return null;
+        List<string> args = ["--set-start-mode", ModeArgument(mode), "--for-user", account];
+        if (restartHost)
+            args.Add("--restart-host");
+        if (Instance is not null)
+            args.AddRange(["--instance", Instance]);
+        args.AddRange(["--host-exe", HostExe]);
+        foreach (var a in HostArguments)
+            args.AddRange(["--host-arg", a]);
+        return args;
+    }
+
+    /// <summary>The arguments of the elevated <c>--run-host</c> helper; null when it would refuse this app's task.</summary>
+    /// <remarks>Only the instance: the helper runs the fixed task, and only when it runs the host next to it.</remarks>
+    public IReadOnlyList<string>? RunHostArguments()
+    {
+        if (!SamePath(HostExe, AppHostExe))
+            return null;
+        return Instance is null ? ["--run-host"] : ["--run-host", "--instance", Instance];
+    }
+
+    /// <summary>The host options a test instance's task may pass (each once): its own suffix and its folders.</summary>
+    private static readonly string[] HelperHostOptions = ["--instance", "--data-dir", "--log-dir", "--claude-json"];
+
+    /// <summary>
+    /// Why the elevated helper must not register these host arguments, or null when it may: none
+    /// without <c>--instance</c>; with it, <c>--instance</c> with the same suffix and optionally
+    /// <c>--data-dir</c>, <c>--log-dir</c> and <c>--claude-json</c>, each once with a full path.
+    /// </summary>
+    internal static string? HelperHostArgumentsError(string? instance, IReadOnlyList<string> hostArguments)
+    {
+        ArgumentNullException.ThrowIfNull(hostArguments);
+        if (instance is null)
+            return hostArguments.Count == 0 ? null : "the host gets no --host-arg without --instance";
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < hostArguments.Count; i += 2)
+        {
+            var option = hostArguments[i];
+            if (!HelperHostOptions.Contains(option, StringComparer.Ordinal))
+                return $"--host-arg {option} is not one of the host's own options ({string.Join(", ", HelperHostOptions)})";
+            if (!seen.Add(option))
+                return $"--host-arg {option} is given twice";
+            if (i + 1 >= hostArguments.Count)
+                return $"--host-arg {option} needs a value";
+            var value = hostArguments[i + 1];
+            if (option == "--instance")
+            {
+                if (!string.Equals(value, instance, StringComparison.Ordinal))
+                    return $"--host-arg --instance must be this instance ({instance}): {value}";
+            }
+            else if (!Path.IsPathFullyQualified(value))
+            {
+                return $"--host-arg {option} must be a full path: {value}";
+            }
+        }
+        return seen.Contains("--instance") ? null : $"--host-arg must include --instance {instance}";
+    }
+
+    private static bool SamePath(string a, string b) =>
+        a.Length > 0 && b.Length > 0 && string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+
+    private static string ModeArgument(StartMode mode) => mode switch
+    {
+        StartMode.Logon => "logon",
+        StartMode.Startup => "startup",
+        _ => throw new ArgumentException($"no start mode {mode}", nameof(mode)),
+    };
+
+    /// <summary>Parses the command line.</summary>
+    /// <param name="args">The arguments.</param>
+    /// <param name="userSid">The user's SID (pipe and single-instance names).</param>
+    /// <param name="localAppData"><c>%LOCALAPPDATA%</c> (tests); default: this user's.</param>
+    /// <param name="appData"><c>%APPDATA%</c> (tests); default: this user's.</param>
+    /// <param name="appDir">The folder of ClaudeRc.exe (tests); default: <see cref="AppContext.BaseDirectory"/>.</param>
+    /// <exception cref="ArgumentException">An unknown option, a missing or bad value.</exception>
+    public static TrayOptions Parse(IReadOnlyList<string> args, string userSid, string? localAppData = null,
+        string? appData = null, string? appDir = null)
+    {
+        string? instance = null, hostExe = null, forUser = null;
+        StartMode? setMode = null;
+        List<string>? hostArgs = null;
+        bool toastActivated = false, unregister = false, restartHost = false, quiet = false, runHost = false, fresh = false, background = false;
+        SetupAction? setup = null;
+        string? other = null;
+        for (var i = 0; i < args.Count; i++)
+        {
+            var arg = args[i];
+            string Value()
+            {
+                if (i + 1 >= args.Count)
+                    throw new ArgumentException($"{arg} needs a value");
+                return args[++i];
+            }
+
+            if (arg is not ("--install" or "--stop-for-update" or "--uninstall" or "--instance" or "--quiet" or "--run-host" or "--fresh-install")
+                && !arg.StartsWith("--instance=", StringComparison.Ordinal))
+            {
+                other ??= arg;
+            }
+            switch (arg)
+            {
+                case "--install" or "--stop-for-update" or "--uninstall":
+                    if (setup is not null)
+                        throw new ArgumentException($"only one of --install, --stop-for-update and --uninstall: {arg}");
+                    setup = arg switch
+                    {
+                        "--install" => SetupAction.Install,
+                        "--stop-for-update" => SetupAction.StopForUpdate,
+                        _ => SetupAction.Uninstall,
+                    };
+                    break;
+                case "--quiet":
+                    quiet = true;
+                    break;
+                case "--run-host":
+                    runHost = true;
+                    break;
+                case "--fresh-install":
+                    fresh = true;
+                    break;
+                case SignInStart.BackgroundArgument:
+                    background = true;
+                    break;
+                case "--instance":
+                    instance = Value();
+                    break;
+                case var _ when arg.StartsWith("--instance=", StringComparison.Ordinal):
+                    instance = arg["--instance=".Length..];
+                    break;
+                case ToastActivatedArgument:
+                    toastActivated = true;
+                    break;
+                case "--unregister-notifications":
+                    unregister = true;
+                    break;
+                case "--host-exe":
+                    hostExe = Value();
+                    if (!Path.IsPathFullyQualified(hostExe))
+                        throw new ArgumentException($"--host-exe must be a full path: {hostExe}");
+                    break;
+                case "--host-arg":
+                    (hostArgs ??= []).Add(Value());
+                    break;
+                case "--set-start-mode":
+                    setMode = Value() switch
+                    {
+                        "logon" => StartMode.Logon,
+                        "startup" => StartMode.Startup,
+                        var v => throw new ArgumentException($"--set-start-mode must be logon or startup: {v}"),
+                    };
+                    break;
+                case "--for-user":
+                    forUser = Value();
+                    if (string.IsNullOrWhiteSpace(forUser))
+                        throw new ArgumentException("--for-user needs an account");
+                    break;
+                case "--restart-host":
+                    restartHost = true;
+                    break;
+                default:
+                    throw new ArgumentException($"unknown argument: {arg}");
+            }
+        }
+        if (setMode is not null && forUser is null)
+            throw new ArgumentException("--set-start-mode needs --for-user");
+        if (setup is not null && (other is not null || runHost))
+            throw new ArgumentException($"the installer's steps take only --instance, --quiet and --install's --fresh-install, not {other ?? "--run-host"}");
+        if (quiet && setup is null)
+            throw new ArgumentException("--quiet goes only with --install, --stop-for-update or --uninstall");
+        if (fresh && setup != SetupAction.Install)
+            throw new ArgumentException("--fresh-install goes only with --install");
+        // The elevated run-host helper: an untrusted command line, so nothing but the fixed task.
+        if (runHost && other is not null)
+            throw new ArgumentException($"--run-host takes only --instance, not {other}");
+
+        // The host's own parser checks the suffix and builds the pipe name, so both always agree.
+        var host = HostOptions.Parse(instance is null ? [] : ["--instance", instance],
+            new HostDefaults("unused", "unused", "unused", userSid));
+        var suffix = instance is null ? "" : "-" + instance;
+        var local = localAppData ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var roaming = appData ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        IReadOnlyList<string> derived = instance is null
+            ? []
+            :
+            [
+                "--instance", instance,
+                "--data-dir", Path.Combine(roaming, Product + suffix),
+                "--log-dir", Path.Combine(local, Product + suffix, "logs"),
+                "--claude-json", Path.Combine(local, Product + suffix, "claude.json"),
+            ];
+        var appHost = Path.Combine(appDir ?? AppContext.BaseDirectory, HostExeName);
+        IReadOnlyList<string> hostArguments = hostArgs ?? derived;
+        if (setMode is not null)
+        {
+            // The elevated helper: only the fixed host, only a test instance's own options.
+            if (hostExe is not null && !SamePath(hostExe, appHost))
+                throw new ArgumentException($"the start-mode helper only sets up the {HostExeName} next to it ({appHost}), not {hostExe}");
+            hostExe = appHost;
+            if (HelperHostArgumentsError(instance, hostArguments) is { } why)
+                throw new ArgumentException(why);
+        }
+        return new TrayOptions
+        {
+            Instance = instance,
+            PipeName = host.PipeName,
+            MutexName = $@"Local\{Product}-tray-{userSid}{suffix}",
+            ShowEventName = $@"Local\{Product}-tray-show-{userSid}{suffix}",
+            QuitEventName = $@"Local\{Product}-tray-quit-{userSid}{suffix}",
+            TaskPath = $@"\{Product}{suffix}\Host",
+            WebViewDataDir = Path.Combine(local, Product, "webview2" + suffix),
+            ToastActivated = toastActivated,
+            UnregisterNotifications = unregister,
+            HostExe = hostExe ?? appHost,
+            AppHostExe = appHost,
+            HostArguments = hostArguments,
+            SetStartMode = setMode,
+            ForUser = forUser,
+            RestartHost = restartHost,
+            Setup = setup,
+            Quiet = quiet,
+            SetupLogPath = Path.Combine(local, Product + suffix, "logs", "setup.log"),
+            RunHost = runHost,
+            FreshInstall = fresh,
+            Background = background,
+        };
+    }
+}

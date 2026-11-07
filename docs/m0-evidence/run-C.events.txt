@@ -1,0 +1,20 @@
+﻿         3 ms  10:14:03.665  exe=C:\Users\Steven\.local\bin\claude.exe
+        17 ms  10:14:03.676  cwd=c:\users\steven\appdata\local\temp\claude\df26003eaca5f50f\f2d7163b-5b2c-5af6-9458-d70f3598d9aa\scratchpad\m0\RUNS\nongitc
+        17 ms  10:14:03.676  cmdline=C:\Users\Steven\.local\bin\claude.exe rc --name "m0 spike & test"
+        17 ms  10:14:03.676  argv[1]=<rc>
+        17 ms  10:14:03.676  argv[2]=<--name>
+        17 ms  10:14:03.677  argv[3]=<m0 spike & test>
+        29 ms  10:14:03.688  pseudoconsole 120x40 created
+        45 ms  10:14:03.704  started pid=15772
+       170 ms  10:14:03.830  job pids=15772:claude
+     18675 ms  10:14:22.335  input (01.in) hex=790D
+     36985 ms  10:14:40.645  job pids=27212:conhost,15772:claude,23968:claude
+     40414 ms  10:14:44.073  input (02.in) hex=03
+     65111 ms  10:15:08.770  input (03.in) hex=03
+     79929 ms  10:15:23.588  input (04.in) hex=20
+     90047 ms  10:15:33.707  timeout: terminating job
+     90049 ms  10:15:33.708  job pids=
+     90075 ms  10:15:33.735  exited code=57005 (0x0000DEAD) killed=True t=90.075s
+     90583 ms  10:15:34.243  job pids after exit=
+     90588 ms  10:15:34.247  reader EOF
+     90588 ms  10:15:34.248  total bytes=34485

@@ -1,0 +1,479 @@
+using System.Collections.Concurrent;
+using System.Threading.Channels;
+using ClaudeRc.Core;
+using ClaudeRc.Core.Ipc;
+using ClaudeRc.Tray.Hosting;
+using ClaudeRc.Tray.Services;
+
+namespace ClaudeRc.Tray.Tests;
+
+/// <summary>A host connection in memory: answers requests with <see cref="Handler"/> and lets a test push events or close it.</summary>
+internal sealed class FakeHostClient : IHostClient
+{
+    private readonly Channel<IpcEvent> _events = Channel.CreateUnbounded<IpcEvent>();
+    private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private string? _reason;
+
+    public ConcurrentQueue<IpcRequest> Requests { get; } = new();
+
+    /// <summary>Answers each request; the default is a fake host with <see cref="Rows"/> and <see cref="Settings"/>.</summary>
+    public Func<IpcRequest, IpcResponse>? Handler { get; set; }
+
+    /// <summary>When set, answers instead of <see cref="Handler"/>, so a test can hold a request in flight.</summary>
+    public Func<IpcRequest, Task<IpcResponse>>? AsyncHandler { get; set; }
+
+    public List<Row> Rows { get; set; } = [];
+
+    public IpcSettings Settings { get; set; } = new(null, true);
+
+    public HostInfo Info { get; set; } = new("1.2.3", @"C:\data", @"C:\logs", @"C:\bin\claude.exe", "2.1.318 (Claude Code)");
+
+    public bool Disposed { get; private set; }
+
+    public ChannelReader<IpcEvent> Events => _events.Reader;
+
+    public Task Closed => _closed.Task;
+
+    public string? CloseReason => Volatile.Read(ref _reason);
+
+    public Task<IpcResponse> SendAsync(IpcRequest request, CancellationToken cancellationToken = default)
+    {
+        if (_closed.Task.IsCompleted)
+            return Task.FromException<IpcResponse>(new IpcClosedException(_reason ?? "closed"));
+        Requests.Enqueue(request);
+        if (AsyncHandler is { } asyncHandler)
+            return WithId(asyncHandler(request).WaitAsync(cancellationToken), request.Id);
+        var response = (Handler ?? Default)(request);
+        return Task.FromResult(response with { Id = request.Id });
+    }
+
+    private static async Task<IpcResponse> WithId(Task<IpcResponse> response, int id) => (await response) with { Id = id };
+
+    private IpcResponse Default(IpcRequest request) => request switch
+    {
+        ListRequest => new IpcResponse { Ok = true, Rows = Rows },
+        SettingsGetRequest => new IpcResponse { Ok = true, Settings = Settings, Info = Info },
+        _ => new IpcResponse { Ok = true },
+    };
+
+    public void Push(IpcEvent e) => _events.Writer.TryWrite(e);
+
+    public void Close(string reason = "the host closed the connection")
+    {
+        Volatile.Write(ref _reason, reason);
+        _events.Writer.TryComplete();
+        _closed.TrySetResult();
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Disposed = true;
+        Close(_reason ?? "the connection was closed");
+        return ValueTask.CompletedTask;
+    }
+
+    public IEnumerable<T> Sent<T>() where T : IpcRequest => Requests.OfType<T>();
+}
+
+/// <summary>Hands out the queued clients; with none queued the host is "not running" (a <see cref="TimeoutException"/>).</summary>
+internal sealed class FakeConnector : IHostConnector
+{
+    private readonly ConcurrentQueue<FakeHostClient> _clients = new();
+    private int _attempts;
+
+    public int Attempts => Volatile.Read(ref _attempts);
+
+    /// <summary>When set, every attempt fails with it (e.g. a pipe that refuses the connection).</summary>
+    public Exception? Error { get; set; }
+
+    public void Enqueue(FakeHostClient client) => _clients.Enqueue(client);
+
+    public Task<IHostClient> ConnectAsync(CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _attempts);
+        if (Error is { } error)
+            return Task.FromException<IHostClient>(error);
+        return _clients.TryDequeue(out var client)
+            ? Task.FromResult<IHostClient>(client)
+            : Task.FromException<IHostClient>(new TimeoutException("the host is not running"));
+    }
+}
+
+internal sealed class FakeDialogs : IDialogs
+{
+    public List<(string Title, string Message)> Confirms { get; } = [];
+    public List<(string Title, string Message)> Errors { get; } = [];
+    public List<(string Title, string Message)> Infos { get; } = [];
+    public bool ConfirmAnswer { get; set; } = true;
+    public string? FolderToPick { get; set; }
+    public string? FileToPick { get; set; }
+
+    public bool Confirm(string title, string message)
+    {
+        Confirms.Add((title, message));
+        return ConfirmAnswer;
+    }
+
+    public void ShowError(string title, string message) => Errors.Add((title, message));
+
+    public void ShowInfo(string title, string message) => Infos.Add((title, message));
+
+    public string? PickFolder() => FolderToPick;
+
+    public string? PickClaudeExecutable(string? current) => FileToPick;
+}
+
+internal sealed class FakeHostTask : IHostTask
+{
+    public StartHostResult RunResult { get; set; } = StartHostResult.Missing(@"\claude-rc-windows\Host");
+    public int Runs { get; private set; }
+    public HostTaskInfo Info { get; set; } = new(HostTaskState.Missing, StartMode.Unknown, @"\claude-rc-windows\Host");
+
+    public Task<HostTaskInfo> GetInfoAsync(CancellationToken cancellationToken = default) => Task.FromResult(Info);
+
+    public Task<StartHostResult> RunAsync(CancellationToken cancellationToken = default)
+    {
+        Runs++;
+        return Task.FromResult(RunResult);
+    }
+}
+
+internal sealed class FakeShell : IShell
+{
+    public List<string> Explorer { get; } = [];
+    public List<string> Terminal { get; } = [];
+
+    public void OpenInExplorer(string path) => Explorer.Add(path);
+
+    public void OpenInTerminal(string path) => Terminal.Add(path);
+}
+
+internal sealed class FakeWindows : IWindows
+{
+    public int SettingsOpened { get; private set; }
+    public List<string> Logs { get; } = [];
+    public List<string> Consoles { get; } = [];
+
+    public void OpenSettings() => SettingsOpened++;
+
+    public void OpenLog(string path, string name) => Logs.Add(path);
+
+    public void OpenConsole(string path, string name) => Consoles.Add(path);
+}
+
+internal static class TestRows
+{
+    public static Row Make(string path, FolderStatus status, bool on = true, bool saved = true, string? name = null,
+        string? prompt = null, int? exitCode = null, int? restartInS = null, string? error = null,
+        IReadOnlyList<string>? lastLines = null) => new()
+        {
+            Path = path,
+            Name = name ?? Path.GetFileName(path),
+            On = on,
+            Saved = saved,
+            Status = status,
+            Prompt = prompt,
+            ExitCode = exitCode,
+            RestartInS = restartInS,
+            Crashes10m = 0,
+            Error = error,
+            LastLines = lastLines,
+        };
+}
+
+internal static class Eventually
+{
+    /// <summary>Waits until <paramref name="condition"/> holds (the connection loop runs on the thread pool in tests).</summary>
+    public static async Task True(Func<bool> condition, string what, int timeoutMs = 5000)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (!condition())
+        {
+            if (Environment.TickCount64 > deadline)
+                Assert.Fail("timed out waiting for: " + what);
+            await Task.Delay(5);
+        }
+    }
+}
+
+/// <summary>The console viewer page: records what the view-model posts to it.</summary>
+internal sealed class FakeViewerPage : ClaudeRc.Tray.ViewModels.IViewerPage
+{
+    private readonly ConcurrentQueue<string> _posted = new();
+
+    public IReadOnlyList<string> Posted => _posted.ToArray();
+
+    public void Post(string json) => _posted.Enqueue(json);
+
+    /// <summary>The posted messages of one type, parsed.</summary>
+    public List<System.Text.Json.JsonElement> OfType(string type) =>
+        Posted.Select(j => System.Text.Json.JsonDocument.Parse(j).RootElement)
+            .Where(e => e.GetProperty("type").GetString() == type).ToList();
+
+    /// <summary>The bytes of every output message, in order.</summary>
+    public List<byte[]> Outputs => OfType("output").Select(e => e.GetProperty("data").GetBytesFromBase64()).ToList();
+
+    /// <summary>The last banner text posted (null = hidden), or "(none)" when no status was posted.</summary>
+    public string? LastStatus => OfType("status") is { Count: > 0 } s
+        ? s[^1].GetProperty("text").GetString()
+        : "(none)";
+}
+
+internal sealed class FakeNotifier : ClaudeRc.Tray.Notifications.IToastNotifier
+{
+    public List<ClaudeRc.Tray.Notifications.ToastRequest> Shown { get; } = [];
+
+    public event EventHandler<string>? Activated;
+
+    public void Show(ClaudeRc.Tray.Notifications.ToastRequest toast)
+    {
+        lock (Shown)
+            Shown.Add(toast);
+    }
+
+    public int Count
+    {
+        get
+        {
+            lock (Shown)
+                return Shown.Count;
+        }
+    }
+
+    public void Click(string path) => Activated?.Invoke(this, path);
+}
+
+/// <summary>Task Scheduler in memory: tasks by path, every call recorded, errors injected per operation.</summary>
+internal sealed class FakeTaskService : ITaskService
+{
+    public sealed class Entry
+    {
+        public required string Xml { get; set; }
+        public required string Account { get; set; }
+        public required TaskLogon Logon { get; set; }
+        public TaskRunState State { get; set; } = TaskRunState.Ready;
+        public int LastResult { get; set; } = HostTaskDefinition.HasNotRun;
+        public DateTime? LastRunTime { get; set; }
+        public DateTime? NextRunTime { get; set; }
+    }
+
+    public Dictionary<string, Entry> Tasks { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Every call in order: "find", "register", "delete", "run", "stop", with the path.</summary>
+    public List<string> Calls { get; } = [];
+
+    /// <summary>The passwords Register was given, in order (null for none).</summary>
+    public List<string?> Passwords { get; } = [];
+
+    /// <summary>Thrown by the next call of that operation ("find", "register", …), then removed.</summary>
+    public Dictionary<string, Queue<Exception>> Errors { get; } = [];
+
+    public void FailNext(string op, Exception e)
+    {
+        if (!Errors.TryGetValue(op, out var q))
+            Errors[op] = q = new Queue<Exception>();
+        q.Enqueue(e);
+    }
+
+    /// <summary>Stop does not end the running instance (a host that hangs).</summary>
+    public bool StopLeavesRunning { get; set; }
+
+    /// <summary>Fails every call of an operation.</summary>
+    public Dictionary<string, Exception> AlwaysFail { get; } = [];
+
+    /// <summary>Called with each call ("stop \claude-rc-windows\Host"), so a test can order it among other fakes' calls.</summary>
+    public Action<string>? Observe { get; set; }
+
+    private void Enter(string op, string path)
+    {
+        Calls.Add($"{op} {path}");
+        Observe?.Invoke($"{op} {path}");
+        if (AlwaysFail.TryGetValue(op, out var always))
+            throw always;
+        if (Errors.TryGetValue(op, out var q) && q.Count > 0)
+            throw q.Dequeue();
+    }
+
+    public void Add(string path, StartMode mode, TaskRunState state = TaskRunState.Ready, int lastResult = HostTaskDefinition.HasNotRun) =>
+        Tasks[path] = new Entry
+        {
+            Xml = HostTaskDefinition.BuildXml(new HostTaskSpec { TaskPath = path, Mode = mode, HostExe = @"C:\app\ClaudeRcHost.exe", Account = @"PC\me" }),
+            Account = @"PC\me",
+            Logon = HostTaskDefinition.LogonFor(mode),
+            State = state,
+            LastResult = lastResult,
+        };
+
+    public TaskSnapshot? Find(string taskPath)
+    {
+        Enter("find", taskPath);
+        return Tasks.TryGetValue(taskPath, out var e) ? new TaskSnapshot(e.Xml, e.State, e.LastResult, e.LastRunTime, e.NextRunTime) : null;
+    }
+
+    public void Register(string taskPath, string xml, string account, PromptedPassword? password, TaskLogon logon)
+    {
+        // A copy for the assertions (test only); the password must still be intact when handed over.
+        Assert.False(password?.IsDisposed ?? false, "the password was wiped before Register");
+        Passwords.Add(password is null ? null : new string(password.Chars));
+        Enter("register", taskPath);
+        // Updating a task leaves its running instance (and last result) as they are.
+        var old = Tasks.GetValueOrDefault(taskPath);
+        Tasks[taskPath] = new Entry
+        {
+            Xml = xml,
+            Account = account,
+            Logon = logon,
+            State = old?.State ?? TaskRunState.Ready,
+            LastResult = old?.LastResult ?? HostTaskDefinition.HasNotRun,
+        };
+    }
+
+    public void Delete(string taskPath)
+    {
+        Enter("delete", taskPath);
+        Tasks.Remove(taskPath);
+    }
+
+    public void Run(string taskPath)
+    {
+        Enter("run", taskPath);
+        if (!Tasks.TryGetValue(taskPath, out var e))
+            throw new FileNotFoundException("no such task", taskPath);
+        e.State = TaskRunState.Running;
+        e.LastResult = HostTaskDefinition.TaskIsRunning;
+    }
+
+    public void Stop(string taskPath)
+    {
+        Enter("stop", taskPath);
+        if (!Tasks.TryGetValue(taskPath, out var e))
+            throw new FileNotFoundException("no such task", taskPath);
+        if (e.State == TaskRunState.Running && !StopLeavesRunning)
+            e.State = TaskRunState.Ready;
+    }
+}
+
+/// <summary>Records what would be run elevated; answers with <see cref="ExitCode"/> (null = the user said No at UAC).</summary>
+internal sealed class FakeElevation : IElevation
+{
+    public List<IReadOnlyList<string>> Runs { get; } = [];
+    public int? ExitCode { get; set; } = 0;
+
+    /// <summary>Runs "inside the elevated helper" before answering (e.g. to change the fake Task Scheduler).</summary>
+    public Action<IReadOnlyList<string>>? OnRun { get; set; }
+
+    public Task<int?> RunElevatedAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken = default)
+    {
+        Runs.Add(arguments);
+        OnRun?.Invoke(arguments);
+        return Task.FromResult(ExitCode);
+    }
+}
+
+/// <summary>Hands out the queued passwords in turn; a null entry (or an empty queue) is Cancel.</summary>
+internal sealed class FakeCredentialPrompt : ICredentialPrompt
+{
+    public Queue<string?> Answers { get; } = new();
+    public List<(string Account, string? Error)> Prompts { get; } = [];
+    public List<PromptedPassword> Handed { get; } = [];
+
+    public PromptedPassword? Prompt(string account, string? error)
+    {
+        Prompts.Add((account, error));
+        if (!Answers.TryDequeue(out var answer) || answer is null)
+            return null;
+        var p = new PromptedPassword(answer.ToCharArray());
+        Handed.Add(p);
+        return p;
+    }
+}
+
+internal sealed class FakeSwitcher : IStartModeSwitcher
+{
+    public List<(StartMode Mode, bool Restart)> Calls { get; } = [];
+    public SwitchResult Result { get; set; } = SwitchResult.Done;
+
+    /// <summary>Runs before answering (e.g. to make the fake task exist).</summary>
+    public Action<StartMode>? OnSwitch { get; set; }
+
+    public Task<SwitchResult> SwitchAsync(StartMode target, bool restartHost, CancellationToken cancellationToken = default)
+    {
+        Calls.Add((target, restartHost));
+        OnSwitch?.Invoke(target);
+        return Task.FromResult(Result);
+    }
+}
+
+/// <summary>The running tray app: <see cref="Quit"/> answers <see cref="QuitResult"/>.</summary>
+internal sealed class FakeRunningTray(List<string>? journal = null) : IRunningTray
+{
+    public bool QuitResult { get; set; } = true;
+    public int Quits { get; private set; }
+
+    public bool Quit(TimeSpan timeout)
+    {
+        Quits++;
+        journal?.Add("quit tray");
+        return QuitResult;
+    }
+}
+
+/// <summary>The Run key and the Startup apps choices in memory; <see cref="Error"/> makes every call throw.</summary>
+internal sealed class FakeStartupRegistry(List<string>? journal = null) : IStartupRegistry
+{
+    public Dictionary<string, string> Run { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> TurnedOff { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Exception? Error { get; set; }
+
+    private void Check()
+    {
+        if (Error is { } e)
+            throw e;
+    }
+
+    public string? GetRunValue(string name)
+    {
+        Check();
+        return Run.GetValueOrDefault(name);
+    }
+
+    public void SetRunValue(string name, string command)
+    {
+        Check();
+        journal?.Add($"run value {name}");
+        Run[name] = command;
+    }
+
+    public void DeleteRunValue(string name)
+    {
+        Check();
+        journal?.Add($"delete run value {name}");
+        Run.Remove(name);
+    }
+
+    public bool IsTurnedOffInStartupApps(string name)
+    {
+        Check();
+        return TurnedOff.Contains(name);
+    }
+
+    public void ClearStartupAppsChoice(string name)
+    {
+        Check();
+        TurnedOff.Remove(name);
+    }
+}
+
+/// <summary>Processes by exe path: <see cref="Left"/> says how many of an exe's processes "survive" a stop.</summary>
+internal sealed class FakeProcessStopper(List<string>? journal = null) : IProcessStopper
+{
+    public Dictionary<string, int> Left { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<(string Exe, TimeSpan Grace)> Stops { get; } = [];
+
+    public int StopAll(string exePath, TimeSpan grace)
+    {
+        Stops.Add((exePath, grace));
+        journal?.Add($"end {exePath}");
+        return Left.GetValueOrDefault(exePath);
+    }
+}
