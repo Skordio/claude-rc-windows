@@ -95,7 +95,9 @@ public sealed class SessionTests
         var result = await s.StopAsync().WaitAsync(Long);
         Assert.True(result.Killed);
         Assert.Equal(Session.KilledExitCode, result.ExitCode);
-        Assert.InRange(sw.Elapsed.TotalSeconds, 4.8, 8);
+        // The lower bound pins the 5 s grace; the upper one only that it ends: with tests in
+        // parallel (and maybe another run) the kill and exit have taken up to ~5 s more.
+        Assert.InRange(sw.Elapsed.TotalSeconds, 4.8, 15);
         Assert.Contains("ctrl-c", h.ReadText("ctrlc.txt"));
         Assert.False(FakeClaudeHarness.IsRunning(s.ProcessId));
     }

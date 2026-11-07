@@ -149,7 +149,8 @@ It switches its console to UTF-8 and VT processing, as claude does.
 
 Host integration tests run one at a time (`DisableTestParallelization`). Each one checks on
 dispose that no `FakeClaude.exe` from the test output folder is still running. They never look
-at, or kill, any other process.
+at, or kill, any other process. (Later: the check counts only FakeClaudes in the test's own temp
+root, and the host tests run in parallel; see m3-decisions section 6.)
 
 ## 5. The host process (`src/ClaudeRc.Host/HostApp.cs`, `Program.cs`)
 

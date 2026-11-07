@@ -152,6 +152,33 @@ stop, signal or take over a process a test did not start.
   names count as claude and the node rule is off. `TestHost` sets it to `FakeClaude.exe`, so an
   in-process test host never even opens the user's `claude.exe` processes. Pinned by
   `AdoptionTests.A_test_host_lists_only_its_own_temp_folders`.
+- **Test isolation: other tests' FakeClaudes.** Image names alone still let a test host see every
+  `FakeClaude.exe rc` on the machine: the external fakes and the hosted sessions (and their `rc`
+  children) of other tests, whether in parallel in the same run, in a second `dotnet test` at the
+  same time, or a manual test host. They showed up as unsaved external rows and broke tests that
+  expect only their own rows (`A_test_host_lists_only_its_own_temp_folders`,
+  `The_hosts_own_sessions_are_never_external_even_with_an_rc_child`, `Add_refuses_…`,
+  `Remove_only_when_off_…`, `DebugCliTests`, …). So there is a second test seam,
+  `HostConfig.ExternalFolderRoot`, used only together with `ExternalImageNames`: a process whose
+  folder is not that root or under it is left out, through the matcher's `normalize` (outside the
+  root reads as "no folder"). `TestHost` sets it to its own temp root. Production matching (SPEC 7)
+  does not change: `ForHost` is untouched and the seam is null by default. Pinned by
+  `AdoptionTests.A_test_host_never_lists_another_test_hosts_fake_claude_rc` (an external and a
+  hosted `rc`-child session of a second test host are never in the first one's rows or events;
+  seen failing without the seam).
+- **"No FakeClaude left" is per test.** The check on dispose (`TestHost`, `FakeClaudeHarness`,
+  `ExternalFake`'s orphan child) counted every FakeClaude from the test output, so it failed while
+  another test or run had its own running. `FakeClaudeHarness.RunningFakeClaudes(root)` now counts
+  only FakeClaudes whose current directory (read from the process, as the scan does) is under the
+  test's own root. Every FakeClaude a test starts runs in its root (children inherit the folder).
+- With both, the host tests run with xUnit's parallel collections on (the assembly-wide
+  `DisableTestParallelization` is gone: about 30 s instead of 70 s) and two runs at once pass.
+  Running them that way also showed load races in the tests, fixed there: reads of a file
+  FakeClaude is writing are retried (`TestHost.Record`, `FakeClaudeHarness.ReadText`); host quit
+  waits for each session's record, which FakeClaude writes after its Ctrl+C handler is set up (the
+  scaled 600 ms starting timeout can show Running before a slow FakeClaude has started, and Off
+  shows while a session is still stopping); the 5 s stop-grace test's upper bound is 15 s (the
+  lower bound pins the grace).
 - **The real ClaudeRcHost.exe in tests** (`HostProcessTests`) uses the production matcher, because
   the seam is not a command-line option (no test-only switch in the shipped exe). It may list the
   user's real `claude rc` sessions as unsaved rows. That is accepted: it only reads them
@@ -208,7 +235,7 @@ confirmation). M3 adds:
   privilege; an elevated host that has it may simply stop such a process, which SPEC 7 allows. Take-over tests now wait on a handle to the child opened while it ran, not on its bare
   PID, which the hosted session started next could reuse.
 - Tray: 10 new test cases (251 → 261); the new properties' tests failed to compile before the properties existed.
-- Every Host test still checks that no FakeClaude is left running.
+- Every Host test still checks that no FakeClaude is left running in its own temp root (section 6).
 
 ## 10. Not done, or left for later
 

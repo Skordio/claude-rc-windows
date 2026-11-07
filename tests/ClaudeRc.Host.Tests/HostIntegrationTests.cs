@@ -437,8 +437,8 @@ public sealed class HostIntegrationTests
     {
         var stagger = TimeSpan.FromMilliseconds(600);
         await using var host = await TestHost.StartAsync(configure: c => c with { Supervisor = c.Supervisor with { StartStagger = stagger } });
-        var a = host.NewFolder(new { ctrl_c_file = "ctrlc.txt" }, "a");
-        var b = host.NewFolder(new { ctrl_c_file = "ctrlc.txt" }, "b");
+        var a = host.NewFolder(new { ctrl_c_file = "ctrlc.txt", record = "record.json" }, "a");
+        var b = host.NewFolder(new { ctrl_c_file = "ctrlc.txt", record = "record.json" }, "b");
         var off = host.NewFolder(new { record = "record.json" }, "off");
         await host.SendOk(new AddRequest(a));
         await host.SendOk(new AddRequest(b));
@@ -446,12 +446,20 @@ public sealed class HostIntegrationTests
         await host.WaitForStatus(a, FolderStatus.Running);
         await host.WaitForStatus(b, FolderStatus.Running);
         await host.WaitForStatus(off, FolderStatus.Running);
+        // Running can come from the (scaled, 600 ms) starting timeout before a slow FakeClaude has
+        // written its record, and Off shows while it is still stopping: wait for the record first,
+        // or it could be written after the delete below.
+        TestHost.Record(off);
         await host.SendOk(new SetRequest(off, false));
         await host.WaitForStatus(off, FolderStatus.Off);
         File.Delete(Path.Combine(off, "record.json"));
+        // FakeClaude sets up its Ctrl+C handler before it writes its record: with the records
+        // there, the quit's Ctrl+C cannot arrive before a slow FakeClaude listens for it.
+        TestHost.Record(a);
+        TestHost.Record(b);
 
         await host.StopHostAsync();
-        Assert.Empty(FakeClaudeHarness.RunningFakeClaudes());
+        Assert.Empty(FakeClaudeHarness.RunningFakeClaudes(host.Root));
         Assert.Contains("ctrl-c", TestHost.ReadText(a, "ctrlc.txt"));
         Assert.Contains("ctrl-c", TestHost.ReadText(b, "ctrlc.txt"));
         Assert.Equal([new FolderEntry(a, true), new FolderEntry(b, true), new FolderEntry(off, false)], new FoldersStore(host.DataDir).Load());

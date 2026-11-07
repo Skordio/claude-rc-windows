@@ -14,7 +14,7 @@ namespace ClaudeRc.Host.Tests;
 /// folders, a temp <c>.claude.json</c>, a random <c>--instance</c> (so the pipe and mutex never meet
 /// the real host's), <c>claude_path</c> set to FakeClaude.exe, and timings scaled down by
 /// <see cref="TimeScale"/>. Talks to the host through the real named pipe. On dispose it stops the
-/// host, checks that no FakeClaude process is left, and deletes everything.
+/// host, checks that no FakeClaude process is left in its root, and deletes everything.
 /// </summary>
 internal sealed class TestHost : IAsyncDisposable
 {
@@ -80,8 +80,10 @@ internal sealed class TestHost : IAsyncDisposable
             UserProfile = Profile,
             Environment = SessionEnvironmentForTests,
             // Adoption: only FakeClaude counts as claude, so a test host never lists (let alone
-            // touches) the user's own claude rc sessions.
+            // touches) the user's own claude rc sessions; and only in this test's root, so it never
+            // lists another test's FakeClaude (a parallel test, another test run, a manual test host).
             ExternalImageNames = [Path.GetFileName(FakeClaudeHarness.FakeClaudeExe)],
+            ExternalFolderRoot = Root,
         }.WithTimeScale(TimeScale);
         return _configure is null ? config : _configure(config);
     }
@@ -161,12 +163,8 @@ internal sealed class TestHost : IAsyncDisposable
     public static void ConfigureFolder(string folder, object fakeConfig) =>
         File.WriteAllText(Path.Combine(folder, "fakeclaude.json"), JsonSerializer.Serialize(fakeConfig));
 
-    public static JsonObject Record(string folder, string name = "record.json")
-    {
-        var path = Path.Combine(folder, name);
-        FakeClaudeHarness.WaitUntil(() => File.Exists(path), $"{name} written");
-        return JsonNode.Parse(File.ReadAllText(path))!.AsObject();
-    }
+    public static JsonObject Record(string folder, string name = "record.json") =>
+        FakeClaudeHarness.ReadRecord(Path.Combine(folder, name));
 
     public static string ReadText(string folder, string name)
     {
@@ -235,7 +233,7 @@ internal sealed class TestHost : IAsyncDisposable
         {
             var sw = Stopwatch.StartNew();
             List<int> left;
-            while ((left = FakeClaudeHarness.RunningFakeClaudes()).Count > 0 && sw.ElapsedMilliseconds < 5000)
+            while ((left = FakeClaudeHarness.RunningFakeClaudes(Root)).Count > 0 && sw.ElapsedMilliseconds < 5000)
                 await Task.Delay(50);
             for (var attempt = 0; attempt < 20 && Directory.Exists(Root); attempt++)
             {

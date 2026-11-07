@@ -102,8 +102,8 @@ internal sealed class ExternalFake : IDisposable
         {
         }
         // A child whose parent was already gone (taken over, or killed first) is not in the tree
-        // any more: kill it only if it is still a FakeClaude from this test output.
-        if (child is { } pid && FakeClaudeHarness.RunningFakeClaudes().Contains(pid))
+        // any more: kill it only if it is still a FakeClaude from this test output, in this folder.
+        if (child is { } pid && FakeClaudeHarness.RunningFakeClaudes(Folder).Contains(pid))
         {
             try
             {

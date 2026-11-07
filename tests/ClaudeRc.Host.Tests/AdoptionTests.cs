@@ -271,6 +271,27 @@ public sealed class AdoptionTests
         var root = PathNormalizer.Normalize(host.Root) + "\\";
         Assert.All(await host.List(), r => Assert.StartsWith(root, r.Path, StringComparison.OrdinalIgnoreCase));
         Assert.Equal([Path.GetFileName(FakeClaudeHarness.FakeClaudeExe)], host.Config().ExternalImageNames);
+        Assert.Equal(host.Root, host.Config().ExternalFolderRoot);
+    }
+
+    [Fact]
+    public async Task A_test_host_never_lists_another_test_hosts_fake_claude_rc()
+    {
+        // Another test (in parallel, or another test run on this machine) has FakeClaude rc
+        // sessions of its own, external and hosted: only the host whose root they run in sees them.
+        await using var mine = await TestHost.StartAsync();
+        await using var other = await TestHost.StartAsync();
+        var otherExternal = other.NewFolder(new { });
+        var otherHosted = other.NewFolder(new { spawn_child = true, spawn_child_args = new[] { "rc" } });
+        using var external = ExternalFake.Start(otherExternal);
+        await other.SendOk(new AddRequest(otherHosted));
+        await other.WaitForStatus(otherExternal, FolderStatus.External);
+        await other.WaitForStatus(otherHosted, FolderStatus.Running);
+
+        await SeveralScans();
+
+        Assert.Empty(await mine.List());
+        Assert.Empty(mine.Events.OfType<RowsEvent>().SelectMany(e => e.Rows));
     }
 
     [Fact]

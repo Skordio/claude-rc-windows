@@ -1,18 +1,16 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using ClaudeRc.Core.Paths;
+using ClaudeRc.Host.Adoption;
 using ClaudeRc.Host.Sessions;
-
-// Integration tests start real processes and assert that none is left over, so they must not
-// run in parallel with each other.
-[assembly: CollectionBehavior(DisableTestParallelization = true)]
 
 namespace ClaudeRc.Host.Tests;
 
 /// <summary>
 /// One FakeClaude run for a test: a fresh folder under %TEMP%\claude-rc-tests with a
 /// fakeclaude.json, sessions started on FakeClaude.exe from the test output, and a check on
-/// dispose that no FakeClaude process is left running.
+/// dispose that no FakeClaude process is left running in that folder.
 /// </summary>
 public sealed class FakeClaudeHarness : IDisposable
 {
@@ -68,10 +66,12 @@ public sealed class FakeClaudeHarness : IDisposable
     /// Right after FakeClaude's File.Move, antivirus or the indexer may still hold the new file, so
     /// a read that fails with a sharing error is tried again for up to a second.
     /// </remarks>
-    public JsonObject Record(string name = "record.json")
+    public JsonObject Record(string name = "record.json") => ReadRecord(File(name));
+
+    /// <inheritdoc cref="Record"/>
+    public static JsonObject ReadRecord(string path)
     {
-        var path = File(name);
-        WaitUntil(() => System.IO.File.Exists(path), $"{name} written");
+        WaitUntil(() => System.IO.File.Exists(path), $"{Path.GetFileName(path)} written");
         var sw = Stopwatch.StartNew();
         while (true)
         {
@@ -86,7 +86,12 @@ public sealed class FakeClaudeHarness : IDisposable
         }
     }
 
-    public string ReadText(string name) => System.IO.File.Exists(File(name)) ? System.IO.File.ReadAllText(File(name)) : "";
+    /// <summary>The file's text, or "" when it does not exist or FakeClaude is writing it right now (tests poll this).</summary>
+    public string ReadText(string name)
+    {
+        try { return System.IO.File.Exists(File(name)) ? System.IO.File.ReadAllText(File(name)) : ""; }
+        catch (IOException) { return ""; }
+    }
 
     public static void WaitUntil(Func<bool> condition, string what, int timeoutMs = 10_000)
     {
@@ -112,9 +117,18 @@ public sealed class FakeClaudeHarness : IDisposable
         }
     }
 
-    /// <summary>FakeClaude processes started from this test output folder.</summary>
-    public static List<int> RunningFakeClaudes()
+    /// <summary>
+    /// FakeClaude processes from this test output folder that run in <paramref name="root"/> or a
+    /// folder under it (their current directory, read from the process).
+    /// </summary>
+    /// <remarks>
+    /// Scoped to one test's own temp root, because other tests (in parallel, or another test run on
+    /// this machine) have FakeClaude processes of their own running: those are not this test's leak.
+    /// A process whose current directory cannot be read (it exited meanwhile) is left out.
+    /// </remarks>
+    public static List<int> RunningFakeClaudes(string root)
     {
+        var prefix = PathNormalizer.Normalize(root).TrimEnd('\\') + "\\";
         var mine = new List<int>();
         foreach (var p in Process.GetProcessesByName("FakeClaude"))
         {
@@ -122,10 +136,14 @@ public sealed class FakeClaudeHarness : IDisposable
             {
                 try
                 {
-                    if (!p.HasExited && string.Equals(p.MainModule?.FileName, FakeClaudeExe, StringComparison.OrdinalIgnoreCase))
+                    if (p.HasExited || !string.Equals(p.MainModule?.FileName, FakeClaudeExe, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (WindowsProcesses.Read(p.Id)?.CurrentDirectory is { Length: > 0 } cwd
+                        && (PathNormalizer.Normalize(cwd).TrimEnd('\\') + "\\").StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                         mine.Add(p.Id);
                 }
-                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException
+                    or ArgumentException or IOException)
                 {
                     // Exited meanwhile, or not ours to inspect.
                 }
@@ -140,7 +158,7 @@ public sealed class FakeClaudeHarness : IDisposable
             s.Dispose();
         var sw = Stopwatch.StartNew();
         List<int> left;
-        while ((left = RunningFakeClaudes()).Count > 0 && sw.ElapsedMilliseconds < 5000)
+        while ((left = RunningFakeClaudes(Folder)).Count > 0 && sw.ElapsedMilliseconds < 5000)
             Thread.Sleep(50);
         for (var attempt = 0; attempt < 20 && Directory.Exists(Folder); attempt++)
         {

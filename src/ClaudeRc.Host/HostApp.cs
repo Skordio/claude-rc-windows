@@ -57,6 +57,14 @@ internal sealed record HostConfig
     /// </summary>
     public IReadOnlyList<string>? ExternalImageNames { get; init; }
 
+    /// <summary>
+    /// Test seam, used only together with <see cref="ExternalImageNames"/>: when set, a process
+    /// counts as external only if its folder is this folder or under it. An in-process test host
+    /// sets its own temp root, so FakeClaude sessions of other tests (another test run, a parallel
+    /// test, a manual test host) on the same machine are never listed. Null: any folder (SPEC 7).
+    /// </summary>
+    public string? ExternalFolderRoot { get; init; }
+
     /// <summary>Take over: how long to wait for an external claude rc to exit after its window was asked to close (SPEC 7). Real time.</summary>
     public TimeSpan TakeoverCloseGrace { get; init; } = TimeSpan.FromSeconds(3);
 
@@ -518,8 +526,25 @@ internal sealed class HostApp : IAsyncDisposable
     // ------------------------------------------------------------------ external sessions (SPEC 7)
 
     private ExternalSessionMatcher CreateMatcher() => _config.ExternalImageNames is { } names
-        ? new ExternalSessionMatcher(_o.UserSid, names, matchNodeCli: false)
+        ? new ExternalSessionMatcher(_o.UserSid, names, matchNodeCli: false, FolderUnderTestRoot(_config.ExternalFolderRoot))
         : ExternalSessionMatcher.ForHost(_o.UserSid, _settings.ClaudePath);
+
+    // Test seam (HostConfig.ExternalFolderRoot): a folder outside the root is "no folder", so the
+    // matcher leaves that process out. Null root: the matcher's default normalisation.
+    private static Func<string, string?>? FolderUnderTestRoot(string? root)
+    {
+        if (root is null)
+            return null;
+        var normalizedRoot = PathNormalizer.Normalize(root);
+        return cwd =>
+        {
+            var folder = PathNormalizer.Normalize(cwd);
+            return PathNormalizer.Comparer.Equals(folder, normalizedRoot)
+                || folder.StartsWith(normalizedRoot.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)
+                ? folder
+                : null;
+        };
+    }
 
     private async Task ScanLoop()
     {
